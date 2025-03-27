@@ -1,5 +1,5 @@
 # PortRoyal Codebase Dump
-Generated: Wed Mar 26 17:12:08 CDT 2025
+Generated: Wed Mar 26 23:42:26 CDT 2025
 
 # Source Code
 
@@ -59,10 +59,23 @@ local GameState = {
         gunpowder = 0
     },
     
+    -- Inventory system (10 slots for cargo and special items)
+    inventory = {
+        slots = {}          -- Will contain inventory slot objects
+    },
+    
     -- Crew management
     crew = {
         members = {},       -- Will contain crew member objects
-        morale = 5          -- Scale 1-10
+        morale = 5,         -- Scale 1-10
+        
+        -- Global crew pool - tracks all possible crew members in the game
+        -- Each crew member has a unique ID
+        pool = {},
+        
+        -- Tracks which crew are available at each location
+        -- Key is location name, value is table of crew IDs
+        availableByLocation = {}
     },
     
     -- Faction relationships (-3 to +3)
@@ -91,7 +104,12 @@ local GameState = {
     
     -- Game settings and flags
     settings = {
-        debug = false  -- Set to false for normal gameplay, true for debugging
+        debug = false,  -- Set to false for normal gameplay, true for debugging
+        portMode = false,  -- When true, display port/location interface instead of map
+        currentPortScreen = "main",  -- Which port screen to display: main, tavern, shipyard, crew, inventory
+        
+        -- Ship state flags
+        moored = false  -- When true, ship is docked at a location rather than at sea
     }
 }
 
@@ -106,8 +124,15 @@ function GameState:init()
     -- Initialize wind direction (random)
     self.environment.wind.currentDirection = self.environment.wind.directions[math.random(#self.environment.wind.directions)]
     
+    -- Initialize the crew pool
+    self:initializeCrewPool()
+    
+    -- Distribute crew members to locations
+    self:distributeCrewToLocations()
+    
     -- Add default crew member (captain)
     table.insert(self.crew.members, {
+        id = "captain",
         name = "Captain",
         role = "Navigator",
         skill = 2,
@@ -120,6 +145,162 @@ function GameState:init()
     print("Initial wind direction: " .. self.environment.wind.currentDirection)
 end
 
+-- Initialize the pool of potential crew members
+function GameState:initializeCrewPool()
+    self.crew.pool = {
+        {
+            id = "js001",
+            name = "Jack Sparrow",
+            role = "Navigator",
+            skill = 3,
+            loyalty = 4,
+            health = 8,
+            cost = 25
+        },
+        {
+            id = "ab002",
+            name = "Anne Bonny",
+            role = "Gunner",
+            skill = 2,
+            loyalty = 3,
+            health = 7,
+            cost = 20
+        },
+        {
+            id = "dh003",
+            name = "Doc Holliday",
+            role = "Surgeon",
+            skill = 2,
+            loyalty = 5,
+            health = 6,
+            cost = 15
+        },
+        {
+            id = "bb004",
+            name = "Blackbeard",
+            role = "Gunner",
+            skill = 3,
+            loyalty = 2,
+            health = 9,
+            cost = 30
+        },
+        {
+            id = "hm005",
+            name = "Henry Morgan",
+            role = "Navigator",
+            skill = 2,
+            loyalty = 4,
+            health = 7,
+            cost = 22
+        },
+        {
+            id = "sp006",
+            name = "Samuel Porter",
+            role = "Surgeon",
+            skill = 3,
+            loyalty = 3,
+            health = 5,
+            cost = 18
+        },
+        {
+            id = "wb007",
+            name = "William Bones",
+            role = "Gunner",
+            skill = 2,
+            loyalty = 5,
+            health = 6,
+            cost = 20
+        },
+        {
+            id = "gr008",
+            name = "Grace O'Malley",
+            role = "Navigator",
+            skill = 3,
+            loyalty = 3,
+            health = 7,
+            cost = 24
+        },
+        {
+            id = "jf009",
+            name = "James Fletcher",
+            role = "Surgeon",
+            skill = 1,
+            loyalty = 4,
+            health = 8,
+            cost = 12
+        }
+    }
+end
+
+-- Distribute crew members to different ports
+function GameState:distributeCrewToLocations()
+    -- Initialize location tables
+    self.crew.availableByLocation = {
+        ["Port Royal"] = {},
+        ["Nassau"] = {},
+        ["Havana"] = {},
+        ["Crown Colony"] = {}
+    }
+    
+    -- Helper function to check if a crew member is already in a location
+    local function isInAnyLocation(crewId)
+        for _, locationCrew in pairs(self.crew.availableByLocation) do
+            for _, id in ipairs(locationCrew) do
+                if id == crewId then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    
+    -- Helper function to get a crew member by role from pool
+    local function getCrewByRole(role)
+        local candidates = {}
+        for _, crew in ipairs(self.crew.pool) do
+            if crew.role == role and not isInAnyLocation(crew.id) then
+                table.insert(candidates, crew)
+            end
+        end
+        
+        if #candidates > 0 then
+            local selected = candidates[math.random(#candidates)]
+            return selected.id
+        end
+        return nil
+    end
+    
+    -- Assign crew by role patterns to each location
+    -- Port Royal: 1 of each role (Navigator, Gunner, Surgeon)
+    table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Navigator"))
+    table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Surgeon"))
+    
+    -- Nassau: 2 Gunners, 1 Navigator
+    table.insert(self.crew.availableByLocation["Nassau"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Nassau"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Nassau"], getCrewByRole("Navigator"))
+    
+    -- Havana: 2 Navigators, 1 Surgeon
+    table.insert(self.crew.availableByLocation["Havana"], getCrewByRole("Navigator"))
+    table.insert(self.crew.availableByLocation["Havana"], getCrewByRole("Navigator"))
+    table.insert(self.crew.availableByLocation["Havana"], getCrewByRole("Surgeon"))
+    
+    -- Crown Colony: 1 Surgeon, 1 Gunner, 1 Navigator
+    table.insert(self.crew.availableByLocation["Crown Colony"], getCrewByRole("Surgeon"))
+    table.insert(self.crew.availableByLocation["Crown Colony"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Crown Colony"], getCrewByRole("Navigator"))
+    
+    -- Remove nil entries (if we ran out of crew)
+    for location, crewList in pairs(self.crew.availableByLocation) do
+        for i = #crewList, 1, -1 do
+            if not crewList[i] then
+                table.remove(crewList, i)
+            end
+        end
+    end
+end
+
 -- Reset game state (for new game or restart)
 function GameState:reset()
     -- Reset ship
@@ -129,6 +310,11 @@ function GameState:reset()
     self.ship.x = 0
     self.ship.y = 0
     self.ship.isMoving = false
+    
+    -- Reset interface modes
+    self.settings.portMode = false
+    self.settings.currentPortScreen = "main"
+    self.settings.moored = false
     
     -- Reset time
     self.time.currentWeek = 1
@@ -145,12 +331,26 @@ function GameState:reset()
     self.resources.timber = 0
     self.resources.gunpowder = 0
     
+    -- Reset inventory
+    self.inventory.slots = {}
+    for i = 1, 10 do
+        self.inventory.slots[i] = {
+            item = nil,
+            quantity = 0
+        }
+    end
+    
     -- Reset crew
     self.crew.members = {}
     self.crew.morale = 5
     
+    -- Reinitialize the crew pool and distribution
+    self:initializeCrewPool()
+    self:distributeCrewToLocations()
+    
     -- Add default crew member (captain)
     table.insert(self.crew.members, {
+        id = "captain",
         name = "Captain",
         role = "Navigator",
         skill = 2,
@@ -220,7 +420,7 @@ function GameState:advanceTime(weeks)
     return not self.time.isGameOver  -- Return false if game is over
 end
 
--- Calculate travel time between zones based on wind
+-- Calculate travel time between zones based on wind and crew
 function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     -- Base travel time is always 1 week
     local baseTravelTime = 1
@@ -231,10 +431,22 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
         return baseTravelTime, "normal"
     end
     
-    -- Debug info for wind calculation
+    -- Debug info for travel calculation
     if self.settings.debug then
         print("Calculating travel time from zone " .. fromZoneIdx .. " to zone " .. toZoneIdx)
         print("Current wind direction: " .. self.environment.wind.currentDirection)
+    end
+    
+    -- Check for Navigator in crew (Ticket 2-6)
+    local hasNavigator = false
+    for _, crewMember in ipairs(self.crew.members) do
+        if crewMember.role == "Navigator" then
+            hasNavigator = true
+            if self.settings.debug then
+                print("Navigator found in crew: " .. crewMember.name)
+            end
+            break
+        end
     end
     
     -- For Sprint 1, we apply a simple wind modifier:
@@ -325,10 +537,23 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
         windModifier = 0
     end
     
-    -- Apply the wind modifier (ensure minimum 0.5 week)
-    local travelTime = math.max(0.5, baseTravelTime + windModifier)
+    -- Apply the wind modifier 
+    local travelTime = baseTravelTime + windModifier
     
-    -- Return both the travel time and the wind effect description
+    -- Apply navigator modifier if present
+    local navigatorEffect = ""
+    if hasNavigator then
+        travelTime = travelTime - 0.5
+        navigatorEffect = " with Navigator"
+        if self.settings.debug then
+            print("Navigator reducing travel time by 0.5 weeks")
+        end
+    end
+    
+    -- Ensure minimum 0.5 week travel time
+    travelTime = math.max(0.5, travelTime)
+    
+    -- Create wind effect description
     local windEffect = ""
     if windModifier > 0 then
         windEffect = "against wind"
@@ -338,14 +563,21 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
         windEffect = "crosswind"
     end
     
+    -- Combine wind and navigator effects
+    local totalEffect = windEffect
+    if hasNavigator then
+        totalEffect = totalEffect .. navigatorEffect
+    end
+    
     if self.settings.debug then
         print("Wind direction: " .. windDirection)
         print("Wind modifier: " .. windModifier)
+        print("Navigator effect: " .. (hasNavigator and "-0.5 weeks" or "none"))
         print("Final travel time: " .. travelTime .. " weeks")
-        print("Wind effect: " .. windEffect)
+        print("Total effect: " .. totalEffect)
     end
     
-    return travelTime, windEffect
+    return travelTime, totalEffect
 end
 
 -- Update ship position
@@ -395,6 +627,55 @@ function GameState:addCrewMember(member)
     return false
 end
 
+-- Get crew member from ID
+function GameState:getCrewMemberById(id)
+    for _, member in ipairs(self.crew.pool) do
+        if member.id == id then
+            return member
+        end
+    end
+    return nil
+end
+
+-- Get available crew at a location
+function GameState:getAvailableCrewAtLocation(locationName)
+    local result = {}
+    
+    -- Check if we have crew listed for this location
+    if not self.crew.availableByLocation[locationName] then
+        return result
+    end
+    
+    -- Get crew IDs at this location
+    local crewIds = self.crew.availableByLocation[locationName]
+    
+    -- Convert IDs to full crew member data
+    for _, id in ipairs(crewIds) do
+        local member = self:getCrewMemberById(id)
+        if member then
+            table.insert(result, member)
+        end
+    end
+    
+    return result
+end
+
+-- Remove a crew member from a location (e.g., when hired)
+function GameState:removeCrewFromLocation(crewId, locationName)
+    if not self.crew.availableByLocation[locationName] then
+        return false
+    end
+    
+    for i, id in ipairs(self.crew.availableByLocation[locationName]) do
+        if id == crewId then
+            table.remove(self.crew.availableByLocation[locationName], i)
+            return true
+        end
+    end
+    
+    return false
+end
+
 -- Change faction reputation
 function GameState:changeFactionRep(faction, amount)
     if self.factions[faction] then
@@ -425,6 +706,7 @@ local gameState = require('gameState')
 local gameMap = require('map')
 local playerShip = require('ship')
 local timeSystem = require('time')
+local portRoyal = require('portRoyal')
 
 function love.load()
     -- Load game assets and initialize states
@@ -440,6 +722,7 @@ function love.load()
     timeSystem:load(gameState)  -- Initialize time tracking
     gameMap:load(gameState)     -- Initialize map 
     playerShip:load(gameState, gameMap)  -- Initialize ship
+    portRoyal:load(gameState)   -- Initialize Port Royal interface
     
     -- Set window properties
     love.window.setTitle("Pirate's Wager: Blood for Gold")
@@ -454,8 +737,16 @@ function love.update(dt)
     if gameState.settings.isPaused then return end
     
     -- Update game state
-    gameMap:update(dt, gameState)
-    playerShip:update(dt, gameState, gameMap)
+    if gameState.settings.portMode then
+        -- Update port interface
+        portRoyal:update(dt, gameState)
+    else
+        -- Update map and ship
+        gameMap:update(dt, gameState)
+        playerShip:update(dt, gameState, gameMap)
+    end
+    
+    -- Always update time system
     timeSystem:update(dt, gameState)
     
     -- Handle game restart
@@ -464,13 +755,22 @@ function love.update(dt)
         timeSystem:load(gameState)  -- Reinitialize systems
         gameMap:load(gameState)
         playerShip:load(gameState, gameMap)
+        portRoyal:load(gameState)
     end
 end
 
 function love.draw()
-    -- Render game
-    gameMap:draw(gameState)
-    playerShip:draw(gameState)
+    -- Render game based on current mode
+    if gameState.settings.portMode then
+        -- Draw port interface
+        portRoyal:draw(gameState)
+    else
+        -- Draw map and ship
+        gameMap:draw(gameState)
+        playerShip:draw(gameState)
+    end
+    
+    -- Always draw time system
     timeSystem:draw(gameState)
     
     -- Display fps in debug mode
@@ -481,17 +781,32 @@ function love.draw()
 end
 
 function love.mousemoved(x, y)
-    gameMap:mousemoved(x, y, gameState)
+    if gameState.settings.portMode then
+        portRoyal:mousemoved(x, y, gameState)
+    else
+        gameMap:mousemoved(x, y, gameState)
+    end
 end
 
 function love.mousepressed(x, y, button)
     if gameState.time.isGameOver then return end
-    gameMap:mousepressed(x, y, button, gameState)
+    
+    if gameState.settings.portMode then
+        portRoyal:mousepressed(x, y, button, gameState)
+    else
+        gameMap:mousepressed(x, y, button, gameState)
+    end
 end
 
 function love.keypressed(key)
     if key == "escape" then
-        love.event.quit()
+        -- If in port mode, return to map
+        if gameState.settings.portMode then
+            gameState.settings.portMode = false
+            gameState.settings.currentPortScreen = "main"
+        else
+            love.event.quit()
+        end
     elseif key == "f1" then
         gameState.settings.debug = not gameState.settings.debug
     elseif key == "p" then
@@ -774,7 +1089,11 @@ function Map:draw(gameState)
         
         local tooltipText
         if self.hoveredZone == gameState.ship.currentZone then
-            tooltipText = zone.name .. "\n" .. zone.description .. "\nCurrent location"
+            if gameState.settings.moored then
+                tooltipText = zone.name .. "\n" .. zone.description .. "\nCurrently moored at this location\n(Click to enter " .. zone.name .. " interface)"
+            else
+                tooltipText = zone.name .. "\n" .. zone.description .. "\nCurrently at sea near this location\n(Click to moor at " .. zone.name .. ")"
+            end
         elseif isAdjacent then
             -- Calculate travel time with wind effects
             local travelTime, windEffect = gameState:calculateTravelTime(gameState.ship.currentZone, self.hoveredZone, self)
@@ -852,11 +1171,27 @@ function Map:draw(gameState)
                 end
             end
         end
+        
+        -- Draw mooring indicator if ship is moored
+        if gameState.settings.moored then
+            love.graphics.setColor(1, 1, 0.3, 0.8)  -- Yellow anchor indicator
+            love.graphics.circle("fill", centerX1, centerY1 + 25, 5)
+            love.graphics.setColor(0, 0, 0, 0.8)
+            love.graphics.circle("line", centerX1, centerY1 + 25, 5)
+        end
     end
     
     -- Display instructions
     love.graphics.setColor(1, 1, 1, 0.7)
-    love.graphics.printf("Hover over zones to see information\nClick adjacent zones to sail there", 10, self.height - 50, 300, "left")
+    
+    local instructionText = "Hover over zones to see information\nClick adjacent zones to sail there"
+    if gameState.ship.currentZone and not gameState.settings.moored then
+        instructionText = instructionText .. "\nClick your current zone to moor your ship"
+    elseif gameState.ship.currentZone and gameState.settings.moored then
+        instructionText = instructionText .. "\nClick your current zone to enter port interface"
+    end
+    
+    love.graphics.printf(instructionText, 10, self.height - 70, 300, "left")
 end
 
 -- Handle mouse movement
@@ -910,6 +1245,21 @@ function Map:mousepressed(x, y, button, gameState)
             -- Get the Ship module and call moveToZone
             local Ship = require('ship')
             Ship:moveToZone(clickedZone, gameState, self)
+        else
+            -- Clicked on current zone
+            local currentZone = self.zones[gameState.ship.currentZone]
+            
+            -- When clicking on current zone, show mooring options
+            if not gameState.settings.moored then
+                -- If not moored, offer to moor at this location
+                print("Mooring at " .. currentZone.name)
+                gameState.settings.moored = true
+            else
+                -- If already moored, enter the location interface
+                print("Entering " .. currentZone.name .. " interface")
+                gameState.settings.portMode = true
+                gameState.settings.currentPortScreen = "main"
+            end
         end
     end
 end
@@ -952,6 +1302,914 @@ function Map:areZonesAdjacent(zoneIndex1, zoneIndex2)
 end
 
 return Map```
+
+## src/portRoyal.lua
+```lua
+-- Port Interface Module
+-- Currently focused on Port Royal but can be extended to all locations
+
+local PortRoyal = {
+    -- UI constants
+    width = 800,
+    height = 600,
+    
+    -- UI elements
+    buttons = {},
+    
+    -- Placeholder art
+    backgrounds = {
+        main = nil,
+        tavern = nil,
+        shipyard = nil
+    },
+    
+    -- Currently displayed crew (loaded dynamically based on location)
+    availableCrew = {},
+    
+    -- Tavern status indicators
+    tavernMessage = nil,
+    tavernMessageTimer = 0,
+}
+
+-- Initialize Port interface
+function PortRoyal:load(gameState)
+    -- Main screen buttons will be generated dynamically based on location
+    self.buttons.main = {}
+    
+    -- Initialize buttons for tavern screen (just the back button initially)
+    self.buttons.tavern = {
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() 
+                gameState.settings.currentPortScreen = "main" 
+                -- Clear crew list when leaving tavern
+                self.availableCrew = {}
+            end
+        }
+    }
+    
+    -- Initialize buttons for shipyard screen
+    self.buttons.shipyard = {
+        {
+            text = "Repair Ship",
+            x = 325,
+            y = 300,
+            width = 150,
+            height = 50,
+            action = function() 
+                -- For now, just display a message that repairs aren't available yet
+                print("Ship repairs not yet implemented")
+                self.shipyardMessage = "Ship repairs will be available in a future update."
+                self.shipyardMessageTimer = 3  -- Show message for 3 seconds
+            end
+        },
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "main" end
+        }
+    }
+    
+    -- Variables for shipyard message display
+    self.shipyardMessage = nil
+    self.shipyardMessageTimer = 0
+    
+    -- Initialize buttons for crew screen
+    self.buttons.crew = {
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "main" end
+        }
+    }
+    
+    -- Initialize buttons for inventory screen
+    self.buttons.inventory = {
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "main" end
+        }
+    }
+    
+    -- Load placeholder background images if available
+    local success, result = pcall(function()
+        return love.graphics.newImage("assets/port_royal_main.png")
+    end)
+    if success then
+        self.backgrounds.main = result
+        print("Port Royal main background loaded")
+    end
+    
+    -- Load tavern background
+    local success, result = pcall(function()
+        return love.graphics.newImage("assets/port-royal-tavern.png")
+    end)
+    if success then
+        self.backgrounds.tavern = result
+        print("Port Royal tavern background loaded")
+    end
+    
+    -- Load shipyard background
+    local success, result = pcall(function()
+        return love.graphics.newImage("assets/port-royal-shipyard.png")
+    end)
+    if success then
+        self.backgrounds.shipyard = result
+        print("Port Royal shipyard background loaded")
+    end
+end
+
+-- Update Port interface
+function PortRoyal:update(dt, gameState)
+    -- Generate location-specific buttons if needed
+    self:generateLocationButtons(gameState)
+    
+    -- Load crew members for the current location if entering tavern
+    local currentScreen = gameState.settings.currentPortScreen
+    if currentScreen == "tavern" and #self.availableCrew == 0 then
+        self:loadAvailableCrewForLocation(gameState)
+    end
+    
+    -- Check if we need to reload any assets
+    if not self.backgrounds.tavern then
+        -- Try to load tavern background
+        local success, result = pcall(function()
+            return love.graphics.newImage("assets/port-royal-tavern.png")
+        end)
+        if success then
+            self.backgrounds.tavern = result
+            print("Port Royal tavern background loaded during update")
+        end
+    end
+    
+    if not self.backgrounds.shipyard then
+        -- Try to load shipyard background
+        local success, result = pcall(function()
+            return love.graphics.newImage("assets/port-royal-shipyard.png")
+        end)
+        if success then
+            self.backgrounds.shipyard = result
+            print("Port Royal shipyard background loaded during update")
+        end
+    end
+    
+    -- Update shipyard message timer
+    if self.shipyardMessage and self.shipyardMessageTimer > 0 then
+        self.shipyardMessageTimer = self.shipyardMessageTimer - dt
+        if self.shipyardMessageTimer <= 0 then
+            self.shipyardMessage = nil
+        end
+    end
+    
+    -- Update tavern message timer
+    if self.tavernMessage and self.tavernMessageTimer > 0 then
+        self.tavernMessageTimer = self.tavernMessageTimer - dt
+        if self.tavernMessageTimer <= 0 then
+            self.tavernMessage = nil
+        end
+    end
+end
+
+-- Load crew members available at the current location
+function PortRoyal:loadAvailableCrewForLocation(gameState)
+    -- Clear current list
+    self.availableCrew = {}
+    
+    -- Get current location
+    local currentZoneIndex = gameState.ship.currentZone
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up location info
+    if currentZoneIndex and currentZoneIndex > 0 then
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+            
+            -- Get available crew at this location
+            self.availableCrew = gameState:getAvailableCrewAtLocation(currentZoneName)
+            
+            -- Update the tavern buttons for these crew members
+            self:updateTavernButtons(gameState, currentZoneName)
+        end
+    end
+end
+
+-- Update the tavern buttons for the available crew members
+function PortRoyal:updateTavernButtons(gameState, locationName)
+    -- Keep the back button (it should be the last button)
+    local backButton = self.buttons.tavern[#self.buttons.tavern]
+    
+    -- Clear all other buttons
+    self.buttons.tavern = {}
+    
+    -- Add hire buttons for each available crew member
+    for i, crew in ipairs(self.availableCrew) do
+        table.insert(self.buttons.tavern, {
+            text = "Hire for " .. crew.cost .. " gold",
+            x = 500,
+            y = 190 + (i-1) * 100 + 20,
+            width = 200,
+            height = 40,
+            crewId = crew.id,  -- Store crew ID for hiring
+            action = function()
+                -- Check if can afford the crew member
+                if not gameState:canAfford("gold", crew.cost) then
+                    self.tavernMessage = "Not enough gold to hire " .. crew.name
+                    self.tavernMessageTimer = 3
+                    return
+                end
+                
+                -- Check if crew is full
+                if #gameState.crew.members >= gameState.ship.crewCapacity then
+                    self.tavernMessage = "Ship crew capacity reached"
+                    self.tavernMessageTimer = 3
+                    return
+                end
+                
+                -- Hire the crew member
+                gameState:spendResources("gold", crew.cost)
+                
+                -- Create a copy of the crew member to add to the player's crew
+                local newCrewMember = {
+                    id = crew.id,
+                    name = crew.name,
+                    role = crew.role,
+                    skill = crew.skill,
+                    loyalty = crew.loyalty,
+                    health = crew.health
+                }
+                
+                -- Add to player's crew
+                gameState:addCrewMember(newCrewMember)
+                
+                -- Remove from location
+                gameState:removeCrewFromLocation(crew.id, locationName)
+                
+                -- Success message
+                self.tavernMessage = crew.name .. " hired successfully!"
+                self.tavernMessageTimer = 3
+                
+                -- Update available crew and buttons
+                self.availableCrew = gameState:getAvailableCrewAtLocation(locationName)
+                self:updateTavernButtons(gameState, locationName)
+            end
+        })
+    end
+    
+    -- Add back button
+    table.insert(self.buttons.tavern, backButton)
+end
+
+-- Generate buttons based on the current location
+function PortRoyal:generateLocationButtons(gameState)
+    -- Get current location
+    local currentZoneIndex = gameState.ship.currentZone
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up location info
+    if currentZoneIndex and currentZoneIndex > 0 then
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+        end
+    end
+    
+    -- Clear existing buttons
+    self.buttons.main = {}
+    
+    -- Generate basic "Set Sail" button for all locations
+    table.insert(self.buttons.main, {
+        text = "Set Sail",
+        x = 325,
+        y = 400,
+        width = 150,
+        height = 50,
+        action = function() 
+            gameState.settings.portMode = false 
+            gameState.settings.moored = false
+            print("Setting sail from " .. currentZoneName)
+        end
+    })
+    
+    -- Add location-specific buttons
+    if currentZoneName == "Port Royal" then
+        -- Port Royal has the full set of options
+        table.insert(self.buttons.main, {
+            text = "Tavern",
+            x = 200,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "tavern" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Shipyard",
+            x = 200,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "shipyard" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Crew",
+            x = 450,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "crew" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Inventory",
+            x = 450,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "inventory" end
+        })
+    elseif currentZoneName == "Nassau" then
+        -- Nassau has a tavern and crew management
+        table.insert(self.buttons.main, {
+            text = "Pirate Tavern",
+            x = 325,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "tavern" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Crew",
+            x = 325,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "crew" end
+        })
+    elseif currentZoneName == "Havana" then
+        -- Havana has a tavern and shipyard
+        table.insert(self.buttons.main, {
+            text = "Spanish Tavern",
+            x = 325,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "tavern" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Shipyard",
+            x = 325,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "shipyard" end
+        })
+    elseif currentZoneName == "Crown Colony" then
+        -- Crown Colony has a shipyard and inventory
+        table.insert(self.buttons.main, {
+            text = "Royal Shipyard",
+            x = 325,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "shipyard" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Inventory",
+            x = 325,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "inventory" end
+        })
+    end
+    
+    -- For all locations, ensure "Set Sail" is at the bottom
+    if #self.buttons.main > 0 then
+        for i, button in ipairs(self.buttons.main) do
+            if button.text == "Set Sail" then
+                button.y = 400  -- Position at bottom
+            end
+        end
+    end
+end
+
+-- Draw Port interface
+function PortRoyal:draw(gameState)
+    -- Get current screen and location
+    local currentScreen = gameState.settings.currentPortScreen
+    local currentZoneIndex = gameState.ship.currentZone
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up the current zone name
+    if currentZoneIndex and currentZoneIndex > 0 then
+        -- Get the Map module to look up zone name
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+        end
+    end
+    
+    -- Draw background based on current screen
+    self:drawBackground(currentScreen)
+    
+    -- Draw gold amount
+    love.graphics.setColor(1, 0.9, 0.2, 1)  -- Gold color
+    love.graphics.print("Gold: " .. gameState.resources.gold, 10, 10)
+    
+    -- Draw screen-specific content
+    if currentScreen == "main" then
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf(currentZoneName .. " Harbor", 0, 100, self.width, "center")
+        
+        -- Draw ship name and class
+        love.graphics.printf("Ship: " .. gameState.ship.name .. " (" .. gameState.ship.class .. ")", 0, 130, self.width, "center")
+        
+        -- Draw location-specific welcome message
+        local welcomeMessage = "Welcome to port. What would you like to do?"
+        
+        if currentZoneName == "Port Royal" then
+            welcomeMessage = "Welcome to Port Royal, the pirate haven of the Caribbean."
+        elseif currentZoneName == "Nassau" then
+            welcomeMessage = "Welcome to Nassau, the lawless pirate stronghold."
+        elseif currentZoneName == "Havana" then
+            welcomeMessage = "Welcome to Havana, the jewel of Spanish colonies."
+        elseif currentZoneName == "Crown Colony" then
+            welcomeMessage = "Welcome to the Crown Colony, an outpost of British influence."
+        elseif currentZoneName:find("Waters") then
+            welcomeMessage = "Your ship is anchored in open waters. Not much to do here."
+        elseif currentZoneName:find("Bay") or currentZoneName:find("Reach") then
+            welcomeMessage = "You've moored at a secluded spot with no settlements."
+        end
+        
+        love.graphics.setColor(1, 0.95, 0.8, 1)  -- Light cream color
+        love.graphics.printf(welcomeMessage, 50, 160, self.width - 100, "center")
+        
+        -- Draw buttons for main screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "tavern" then
+        -- Get current location for tavern name
+        local currentZoneIndex = gameState.ship.currentZone
+        local tavernName = "The Rusty Anchor Tavern"
+        local tavernDescription = "The tavern is filled with sailors, merchants, and pirates.\nHere you can recruit crew members and hear rumors."
+        
+        -- Set location-specific tavern names
+        if currentZoneIndex and currentZoneIndex > 0 then
+            local Map = require('map')
+            local zone = Map:getZone(currentZoneIndex)
+            if zone then
+                if zone.name == "Nassau" then
+                    tavernName = "The Black Flag Tavern"
+                    tavernDescription = "A rowdy establishment frequented by pirates.\nRecruit dangerous but skilled crew members here."
+                elseif zone.name == "Havana" then
+                    tavernName = "La Cantina del Rey"
+                    tavernDescription = "An elegant Spanish tavern with fine wines.\nHear rumors about Spanish treasure fleets here."
+                end
+            end
+        end
+        
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf(tavernName, 0, 50, self.width, "center")
+        
+        -- If the background image doesn't include text, draw it manually
+        if not self.backgrounds.tavern then
+            love.graphics.printf(tavernDescription, 0, 120, self.width, "center")
+        end
+        
+        -- Draw available crew for hire
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Available Crew for Hire:", 0, 160, self.width, "center")
+        
+        -- Draw table header
+        love.graphics.setColor(0.8, 0.7, 0.5, 1)
+        love.graphics.print("Name", 100, 190)
+        love.graphics.print("Role", 250, 190)
+        love.graphics.print("Stats", 350, 190)
+        
+        -- Draw available crew members
+        for i, crew in ipairs(self.availableCrew) do
+            local yPos = 190 + (i-1) * 100  -- Increased vertical spacing
+            
+            -- Background panel for each crew member (including hire button area)
+            love.graphics.setColor(0.2, 0.2, 0.3, 0.6)
+            love.graphics.rectangle("fill", 90, yPos, 620, 80)
+            love.graphics.setColor(0.4, 0.4, 0.5, 0.8)
+            love.graphics.rectangle("line", 90, yPos, 620, 80)
+            
+            -- Display crew info
+            love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            love.graphics.print(crew.name, 100, yPos + 10)
+            
+            -- Color code the role to match the crew management screen
+            if crew.role == "Navigator" then
+                love.graphics.setColor(0.7, 1, 0.7, 1)  -- Green for navigators
+            elseif crew.role == "Gunner" then
+                love.graphics.setColor(1, 0.7, 0.7, 1)  -- Red for gunners
+            elseif crew.role == "Surgeon" then
+                love.graphics.setColor(0.7, 0.7, 1, 1)  -- Blue for surgeons
+            else
+                love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            end
+            
+            love.graphics.print(crew.role, 250, yPos + 10)
+            
+            -- Display crew stats
+            love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            love.graphics.print("Skill: " .. crew.skill, 350, yPos + 10)
+            love.graphics.print("Loyalty: " .. crew.loyalty, 350, yPos + 30)
+            love.graphics.print("Health: " .. crew.health, 350, yPos + 50)
+            
+            -- Display hire cost
+            love.graphics.setColor(1, 0.9, 0.2, 1)
+            love.graphics.print("Cost: " .. crew.cost .. " gold", 100, yPos + 50)
+            
+            -- Draw integrated hire button (right side of panel)
+            love.graphics.setColor(0.3, 0.5, 0.7, 0.9)
+            love.graphics.rectangle("fill", 500, yPos + 20, 200, 40)
+            love.graphics.setColor(0.5, 0.7, 0.9, 1)
+            love.graphics.rectangle("line", 500, yPos + 20, 200, 40)
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.printf("Hire for " .. crew.cost .. " gold", 500, yPos + 33, 200, "center")
+        end
+        
+        -- Show player's current gold
+        love.graphics.setColor(1, 0.9, 0.2, 1)
+        love.graphics.printf("Your gold: " .. gameState.resources.gold, 0, 440, self.width, "center")
+        
+        -- Display crew capacity
+        love.graphics.setColor(0.7, 0.85, 1, 1)
+        love.graphics.printf("Ship Crew: " .. #gameState.crew.members .. "/" .. gameState.ship.crewCapacity, 0, 470, self.width, "center")
+        
+        -- Display tavern message if active
+        if self.tavernMessage then
+            love.graphics.setColor(0, 0, 0, 0.7)
+            love.graphics.rectangle("fill", 150, 380, 500, 40)
+            love.graphics.setColor(1, 1, 0, 1)
+            love.graphics.printf(self.tavernMessage, 150, 390, 500, "center")
+        end
+        
+        -- Draw buttons for tavern screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "shipyard" then
+        -- Get current location for shipyard name
+        local currentZoneIndex = gameState.ship.currentZone
+        local shipyardName = "Port Royal Shipyard"
+        local shipyardDescription = "The shipyard is busy with workers repairing vessels.\nHere you can upgrade your ship or purchase a new one."
+        
+        -- Set location-specific shipyard names
+        if currentZoneIndex and currentZoneIndex > 0 then
+            local Map = require('map')
+            local zone = Map:getZone(currentZoneIndex)
+            if zone then
+                if zone.name == "Havana" then
+                    shipyardName = "Havana Naval Yards"
+                    shipyardDescription = "A Spanish shipyard specializing in galleons.\nSpanish vessels are sturdy but more expensive."
+                elseif zone.name == "Crown Colony" then
+                    shipyardName = "Royal Navy Dockyard"
+                    shipyardDescription = "A military shipyard with British vessels.\nStrict regulations, but high-quality ships available."
+                end
+            end
+        end
+        
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf(shipyardName, 0, 50, self.width, "center")
+        
+        -- If the background image doesn't include text, draw it manually
+        if not self.backgrounds.shipyard then
+            love.graphics.printf(shipyardDescription, 0, 150, self.width, "center")
+        end
+        
+        -- Draw current ship status
+        love.graphics.setColor(0.8, 0.8, 1, 1)
+        love.graphics.printf("Current Ship: " .. gameState.ship.name .. " (" .. gameState.ship.class .. ")", 0, 220, self.width, "center")
+        love.graphics.printf("Hull Durability: " .. gameState.ship.durability .. "/10", 0, 250, self.width, "center")
+        
+        -- Draw shipyard message if active
+        if self.shipyardMessage then
+            love.graphics.setColor(0, 0, 0, 0.7)
+            love.graphics.rectangle("fill", 150, 380, 500, 40)
+            love.graphics.setColor(1, 1, 0, 1)
+            love.graphics.printf(self.shipyardMessage, 150, 390, 500, "center")
+        end
+        
+        -- Draw buttons for shipyard screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "crew" then
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Crew Management", 0, 70, self.width, "center")
+        
+        -- Draw crew info
+        love.graphics.setColor(0.7, 0.85, 1, 1)
+        love.graphics.printf("Crew Size: " .. #gameState.crew.members .. "/" .. gameState.ship.crewCapacity, 0, 110, self.width, "center")
+        love.graphics.printf("Crew Morale: " .. gameState.crew.morale .. "/10", 0, 140, self.width, "center")
+        
+        -- Draw crew table headers
+        love.graphics.setColor(1, 0.9, 0.7, 1)
+        love.graphics.print("Name", 130, 180)
+        love.graphics.print("Role", 300, 180)
+        love.graphics.print("Skill", 450, 180)
+        love.graphics.print("Loyalty", 520, 180)
+        love.graphics.print("Health", 600, 180)
+        
+        -- Draw table separator
+        love.graphics.setColor(0.6, 0.6, 0.7, 1)
+        love.graphics.line(120, 200, 680, 200)
+        
+        -- List crew members with stats in a table format
+        love.graphics.setColor(0.9, 0.9, 0.9, 1)
+        local yPos = 210
+        for i, member in ipairs(gameState.crew.members) do
+            -- Highlight navigator role for ticket 2-6 visibility
+            if member.role == "Navigator" then
+                love.graphics.setColor(0.7, 1, 0.7, 1)  -- Green for navigators
+            else
+                love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            end
+            
+            love.graphics.print(member.name, 130, yPos)
+            love.graphics.print(member.role, 300, yPos)
+            love.graphics.print(member.skill or 1, 450, yPos)
+            love.graphics.print(member.loyalty or 5, 520, yPos)
+            love.graphics.print(member.health or 10, 600, yPos)
+            
+            -- Draw separator between crew members
+            love.graphics.setColor(0.3, 0.3, 0.4, 0.5)
+            love.graphics.line(120, yPos + 25, 680, yPos + 25)
+            
+            yPos = yPos + 40
+        end
+        
+        -- Draw empty slots if not at capacity
+        for i = #gameState.crew.members + 1, gameState.ship.crewCapacity do
+            love.graphics.setColor(0.4, 0.4, 0.5, 0.5)
+            love.graphics.print("Empty slot", 130, yPos)
+            love.graphics.line(120, yPos + 25, 680, yPos + 25)
+            yPos = yPos + 40
+        end
+        
+        -- Draw role effects information
+        love.graphics.setColor(0.9, 0.8, 0.6, 1)
+        love.graphics.printf("Crew Role Effects:", 150, 400, 500, "center")
+        
+        love.graphics.setColor(0.7, 1, 0.7, 1)
+        love.graphics.printf("Navigator: Reduces travel time between zones by 0.5 weeks", 150, 430, 500, "center")
+        
+        -- Draw buttons for crew screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "inventory" then
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Inventory", 0, 70, self.width, "center")
+        
+        -- Draw resources section
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Resources:", 100, 120, 200, "left")
+        
+        -- Draw resources
+        love.graphics.setColor(0.9, 0.9, 0.9, 1)
+        love.graphics.print("Gold: " .. gameState.resources.gold, 120, 150)
+        love.graphics.print("Rum: " .. gameState.resources.rum, 120, 180)
+        love.graphics.print("Timber: " .. gameState.resources.timber, 120, 210)
+        love.graphics.print("Gunpowder: " .. gameState.resources.gunpowder, 120, 240)
+        
+        -- Draw cargo slots section
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Cargo Slots:", 400, 120, 200, "left")
+        
+        -- Draw cargo slots (10 slots)
+        local slotSize = 50
+        local startX = 400
+        local startY = 150
+        local cols = 5
+        
+        for i = 1, 10 do
+            local row = math.floor((i-1) / cols)
+            local col = (i-1) % cols
+            local x = startX + col * (slotSize + 10)
+            local y = startY + row * (slotSize + 10)
+            
+            -- Draw slot background
+            love.graphics.setColor(0.2, 0.2, 0.3, 1)
+            love.graphics.rectangle("fill", x, y, slotSize, slotSize)
+            
+            -- Draw slot border
+            love.graphics.setColor(0.4, 0.4, 0.5, 1)
+            love.graphics.rectangle("line", x, y, slotSize, slotSize)
+            
+            -- Draw slot content if any
+            local slot = gameState.inventory.slots[i]
+            if slot and slot.item then
+                love.graphics.setColor(0.9, 0.9, 0.9, 1)
+                love.graphics.printf(slot.item, x, y + 10, slotSize, "center")
+                love.graphics.printf(slot.quantity, x, y + 30, slotSize, "center")
+            else
+                -- Draw empty slot number
+                love.graphics.setColor(0.5, 0.5, 0.5, 0.5)
+                love.graphics.printf(i, x + 15, y + 15, 20, "center")
+            end
+        end
+        
+        -- Debug button for adding resources (if debug mode enabled)
+        if gameState.settings.debug then
+            love.graphics.setColor(0.3, 0.6, 0.3, 1)
+            love.graphics.rectangle("fill", 120, 270, 150, 30)
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.printf("+ 10 of each resource", 120, 275, 150, "center")
+        end
+        
+        -- Draw buttons for inventory screen
+        self:drawButtons(currentScreen)
+    end
+end
+
+-- Helper function to draw background
+function PortRoyal:drawBackground(screen)
+    -- Set color
+    love.graphics.setColor(1, 1, 1, 1)
+    
+    -- Get current location
+    local currentZoneIndex = nil
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up location info
+    if _G.gameState and _G.gameState.ship then
+        currentZoneIndex = _G.gameState.ship.currentZone
+    end
+    
+    if currentZoneIndex and currentZoneIndex > 0 then
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+        end
+    end
+    
+    -- Try to load location-specific background if available
+    local locationKey = currentZoneName:lower():gsub("%s+", "_")
+    local locationBackground = nil
+    
+    if screen == "main" then
+        local success, result = pcall(function()
+            return love.graphics.newImage("assets/" .. locationKey .. "_main.png")
+        end)
+        if success then
+            locationBackground = result
+        end
+    end
+    
+    -- Check if we have a background image for this screen
+    if locationBackground then
+        -- We have a location-specific background
+        love.graphics.draw(locationBackground, 0, 0)
+    elseif screen == "main" and self.backgrounds.main then
+        -- Fall back to generic port background
+        love.graphics.draw(self.backgrounds.main, 0, 0)
+    elseif screen == "tavern" and self.backgrounds.tavern then
+        love.graphics.draw(self.backgrounds.tavern, 0, 0)
+    elseif screen == "shipyard" and self.backgrounds.shipyard then
+        love.graphics.draw(self.backgrounds.shipyard, 0, 0)
+    else
+        -- Draw a fallback colored background
+        if screen == "main" then
+            -- Based on zone type (could become more sophisticated)
+            if currentZoneName == "Port Royal" then
+                love.graphics.setColor(0.2, 0.3, 0.5, 1)  -- Deep blue for Port Royal
+            elseif currentZoneName:find("Waters") then
+                love.graphics.setColor(0.2, 0.4, 0.5, 1)  -- Different blue for waters
+            elseif currentZoneName == "Nassau" or currentZoneName == "Havana" then
+                love.graphics.setColor(0.5, 0.3, 0.2, 1)  -- Brown for settlements
+            else
+                love.graphics.setColor(0.3, 0.3, 0.4, 1)  -- Default color
+            end
+        elseif screen == "tavern" then
+            love.graphics.setColor(0.3, 0.2, 0.1, 1)  -- Brown for tavern
+        elseif screen == "shipyard" then
+            love.graphics.setColor(0.4, 0.4, 0.5, 1)  -- Grey for shipyard
+        elseif screen == "crew" then
+            love.graphics.setColor(0.2, 0.3, 0.4, 1)  -- Navy for crew
+        elseif screen == "inventory" then
+            love.graphics.setColor(0.3, 0.3, 0.3, 1)  -- Grey for inventory
+        end
+        
+        -- Fill background
+        love.graphics.rectangle("fill", 0, 0, self.width, self.height)
+    end
+end
+
+-- Helper function to draw buttons
+function PortRoyal:drawButtons(screen)
+    -- Only draw buttons for the current screen
+    if not self.buttons[screen] then
+        return
+    end
+    
+    -- Position the "Back to Port" button at the bottom for non-main screens
+    if screen ~= "main" and #self.buttons[screen] == 1 and 
+       self.buttons[screen][1].text == "Back to Port" then
+        self.buttons[screen][1].y = 520
+    end
+    
+    for _, button in ipairs(self.buttons[screen]) do
+        -- Draw button background
+        love.graphics.setColor(0.4, 0.4, 0.6, 1)
+        love.graphics.rectangle("fill", button.x, button.y, button.width, button.height, 5, 5)
+        
+        -- Draw button border
+        love.graphics.setColor(0.6, 0.6, 0.8, 1)
+        love.graphics.rectangle("line", button.x, button.y, button.width, button.height, 5, 5)
+        
+        -- Draw button text
+        love.graphics.setColor(1, 1, 1, 1)
+        local font = love.graphics.getFont()
+        local textWidth = font:getWidth(button.text)
+        local textHeight = font:getHeight()
+        love.graphics.print(
+            button.text,
+            button.x + (button.width/2) - (textWidth/2),
+            button.y + (button.height/2) - (textHeight/2)
+        )
+    end
+end
+
+-- Handle mouse movement
+function PortRoyal:mousemoved(x, y, gameState)
+    -- Could implement hover effects for buttons here
+end
+
+-- Handle mouse clicks
+function PortRoyal:mousepressed(x, y, button, gameState)
+    if button ~= 1 then  -- Only process left clicks
+        return
+    end
+    
+    local currentScreen = gameState.settings.currentPortScreen
+    
+    -- Print debug info
+    if gameState.settings.debug then
+        print("Port Royal screen click at: " .. x .. ", " .. y .. " on screen: " .. currentScreen)
+    end
+    
+    -- Special handling for inventory debug button
+    if currentScreen == "inventory" and gameState.settings.debug then
+        if x >= 120 and x <= 270 and y >= 270 and y <= 300 then
+            -- Debug button for adding resources
+            gameState.resources.gold = gameState.resources.gold + 10
+            gameState.resources.rum = gameState.resources.rum + 10
+            gameState.resources.timber = gameState.resources.timber + 10
+            gameState.resources.gunpowder = gameState.resources.gunpowder + 10
+            print("DEBUG: Added 10 of each resource")
+            return
+        end
+    end
+    
+    -- Check if any button was clicked
+    if self.buttons[currentScreen] then
+        for i, btn in ipairs(self.buttons[currentScreen]) do
+            if x >= btn.x and x <= btn.x + btn.width and
+               y >= btn.y and y <= btn.y + btn.height then
+                -- Button was clicked, execute its action
+                if btn.action then
+                    if gameState.settings.debug then
+                        print("Button clicked: " .. btn.text)
+                    end
+                    btn.action()
+                end
+                return
+            end
+        end
+    end
+end
+
+return PortRoyal```
 
 ## src/ship.lua
 ```lua
@@ -1024,6 +2282,9 @@ function Ship:update(dt, gameState, gameMap)
             gameState.ship.y = self.targetY
             gameState:setShipMoving(false)
             print("Ship arrived at " .. gameMap.zones[gameState.ship.currentZone].name)
+            
+            -- We're now at the destination, but not yet moored
+            gameState.settings.moored = false
         end
     end
 end
@@ -1120,6 +2381,10 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
             
             -- Actually advance the game time
             gameState:advanceTime(travelTime)
+            
+            -- We no longer automatically enter Port Royal
+            -- This will be handled by the mooring system instead
+            
             return true
         else
             print("Cannot move to " .. targetZone.name .. " - not adjacent to current zone")
@@ -1272,6 +2537,155 @@ end
 return TimeSystem```
 
 # Documentation
+
+## docs/CrewSystem.md
+# Crew System Documentation
+
+## Overview
+
+The crew management system tracks individual crew members, their distribution across different locations, and their effects on gameplay. It serves as the foundation for the staffing and personnel aspects of the game, encompassing recruitment, character progression, and gameplay effects like the Navigator's travel time reduction.
+
+## Architecture
+
+### Core Components
+
+The crew system is built around several key components:
+
+1. **Global Crew Pool**: A master list of all potential crew members in the game
+2. **Location-Based Availability**: Tracking which crew members are available at which port locations
+3. **Player's Crew Roster**: The collection of crew members currently serving on the player's ship
+4. **Role-Based Effects**: Gameplay modifications based on crew roles (e.g., Navigators reducing travel time)
+
+### Data Structures
+
+#### Crew Member Object
+
+Each crew member is a uniquely identifiable entity with a set of properties:
+
+```lua
+crewMember = {
+    id = "js001",             -- Unique identifier
+    name = "Jack Sparrow",    -- Display name
+    role = "Navigator",       -- Role (Navigator, Gunner, Surgeon)
+    skill = 3,                -- Skill level (1-5)
+    loyalty = 4,              -- Loyalty to player (1-10)
+    health = 8,               -- Health status (1-10)
+    cost = 25                 -- Recruitment cost in gold
+}
+```
+
+#### GameState Crew Data
+
+The crew data is stored within the central GameState:
+
+```lua
+GameState.crew = {
+    members = {},             -- Player's current crew (array of crew members)
+    morale = 5,               -- Overall crew morale (1-10)
+    
+    pool = {},                -- Global pool of all potential crew members
+    availableByLocation = {}  -- Mapping of locations to available crew member IDs
+}
+```
+
+## Functionality
+
+### Crew Distribution and Recruitment
+
+1. **Initialization**: During game start, the system:
+   - Populates the global crew pool with predefined crew members
+   - Distributes crew members to different locations based on location-specific criteria
+
+2. **Availability**: Each location has a different set of available crew members:
+   - Port Royal: Balanced mix of all roles
+   - Nassau: Focus on Gunners and combat specialists
+   - Havana: Focus on Navigators and exploration specialists
+   - Crown Colony: Mix with a focus on higher quality crew
+
+3. **Recruitment**: When a player hires a crew member:
+   - Gold is deducted based on the crew member's cost
+   - The crew member is added to the player's roster
+   - The crew member is removed from the location's available pool
+
+### Role Effects
+
+Each crew role provides specific benefits to gameplay:
+
+1. **Navigator**: Reduces travel time between zones by 0.5 weeks
+   - Implementation: When calculating travel time, checks if a Navigator is present in the crew
+   - The reduction is applied after wind effects
+   - Multiple Navigators currently don't stack (planned for future implementation)
+
+2. **Gunner**: (Currently visual only, to be implemented in future sprints)
+   - Will improve combat effectiveness in ship battles
+
+3. **Surgeon**: (Currently visual only, to be implemented in future sprints)
+   - Will provide healing and recovery benefits for crew
+
+## Implementation Details
+
+### Adding a New Crew Member to Pool
+
+To add a new crew member to the global pool:
+
+```lua
+table.insert(GameState.crew.pool, {
+    id = "unique_id",
+    name = "Crew Name",
+    role = "Role",
+    skill = skillValue,
+    loyalty = loyaltyValue,
+    health = healthValue,
+    cost = goldCost
+})
+```
+
+### Crew Distribution Logic
+
+Crew are distributed based on role patterns for each location:
+
+```lua
+-- Example distribution pattern
+-- Port Royal: 1 of each role (Navigator, Gunner, Surgeon)
+table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Navigator"))
+table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Gunner"))
+table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Surgeon"))
+```
+
+### Hiring Implementation
+
+The full hiring process:
+
+1. Check if the player can afford the crew member
+2. Check if there is space in the crew roster (based on ship capacity)
+3. Deduct gold from player resources
+4. Add crew member to player's roster
+5. Remove crew member from location availability
+6. Update the tavern interface to reflect changes
+
+### Accessing Crew Role Effects
+
+To check if a player has a crew member with a specific role:
+
+```lua
+local hasRole = false
+for _, crewMember in ipairs(gameState.crew.members) do
+    if crewMember.role == "RoleName" then
+        hasRole = true
+        break
+    end
+end
+```
+
+## Extension Points
+
+The crew system is designed for future extension in several ways:
+
+1. **Rotation and Refresh**: Implementing periodic crew rotation at ports
+2. **Character Progression**: Adding experience and leveling for crew members
+3. **Role Stacking**: Implementing cumulative effects for multiple crew with the same role
+4. **Advanced Effects**: Adding more complex role effects and combinations
+5. **Events and Interactions**: Creating crew-specific events and storylines
 
 ## docs/GameState.md
 # GameState Module Documentation
@@ -2477,7 +3891,7 @@ Pokemon, Fire Emblem, and Golden Sun for inspiration on how to work around low-r
 
 ## ./codebase_dump.md
 # PortRoyal Codebase Dump
-Generated: Wed Mar 26 17:12:08 CDT 2025
+Generated: Wed Mar 26 23:42:26 CDT 2025
 
 # Source Code
 
@@ -2537,10 +3951,23 @@ local GameState = {
         gunpowder = 0
     },
     
+    -- Inventory system (10 slots for cargo and special items)
+    inventory = {
+        slots = {}          -- Will contain inventory slot objects
+    },
+    
     -- Crew management
     crew = {
         members = {},       -- Will contain crew member objects
-        morale = 5          -- Scale 1-10
+        morale = 5,         -- Scale 1-10
+        
+        -- Global crew pool - tracks all possible crew members in the game
+        -- Each crew member has a unique ID
+        pool = {},
+        
+        -- Tracks which crew are available at each location
+        -- Key is location name, value is table of crew IDs
+        availableByLocation = {}
     },
     
     -- Faction relationships (-3 to +3)
@@ -2569,7 +3996,12 @@ local GameState = {
     
     -- Game settings and flags
     settings = {
-        debug = false  -- Set to false for normal gameplay, true for debugging
+        debug = false,  -- Set to false for normal gameplay, true for debugging
+        portMode = false,  -- When true, display port/location interface instead of map
+        currentPortScreen = "main",  -- Which port screen to display: main, tavern, shipyard, crew, inventory
+        
+        -- Ship state flags
+        moored = false  -- When true, ship is docked at a location rather than at sea
     }
 }
 
@@ -2584,8 +4016,15 @@ function GameState:init()
     -- Initialize wind direction (random)
     self.environment.wind.currentDirection = self.environment.wind.directions[math.random(#self.environment.wind.directions)]
     
+    -- Initialize the crew pool
+    self:initializeCrewPool()
+    
+    -- Distribute crew members to locations
+    self:distributeCrewToLocations()
+    
     -- Add default crew member (captain)
     table.insert(self.crew.members, {
+        id = "captain",
         name = "Captain",
         role = "Navigator",
         skill = 2,
@@ -2598,6 +4037,162 @@ function GameState:init()
     print("Initial wind direction: " .. self.environment.wind.currentDirection)
 end
 
+-- Initialize the pool of potential crew members
+function GameState:initializeCrewPool()
+    self.crew.pool = {
+        {
+            id = "js001",
+            name = "Jack Sparrow",
+            role = "Navigator",
+            skill = 3,
+            loyalty = 4,
+            health = 8,
+            cost = 25
+        },
+        {
+            id = "ab002",
+            name = "Anne Bonny",
+            role = "Gunner",
+            skill = 2,
+            loyalty = 3,
+            health = 7,
+            cost = 20
+        },
+        {
+            id = "dh003",
+            name = "Doc Holliday",
+            role = "Surgeon",
+            skill = 2,
+            loyalty = 5,
+            health = 6,
+            cost = 15
+        },
+        {
+            id = "bb004",
+            name = "Blackbeard",
+            role = "Gunner",
+            skill = 3,
+            loyalty = 2,
+            health = 9,
+            cost = 30
+        },
+        {
+            id = "hm005",
+            name = "Henry Morgan",
+            role = "Navigator",
+            skill = 2,
+            loyalty = 4,
+            health = 7,
+            cost = 22
+        },
+        {
+            id = "sp006",
+            name = "Samuel Porter",
+            role = "Surgeon",
+            skill = 3,
+            loyalty = 3,
+            health = 5,
+            cost = 18
+        },
+        {
+            id = "wb007",
+            name = "William Bones",
+            role = "Gunner",
+            skill = 2,
+            loyalty = 5,
+            health = 6,
+            cost = 20
+        },
+        {
+            id = "gr008",
+            name = "Grace O'Malley",
+            role = "Navigator",
+            skill = 3,
+            loyalty = 3,
+            health = 7,
+            cost = 24
+        },
+        {
+            id = "jf009",
+            name = "James Fletcher",
+            role = "Surgeon",
+            skill = 1,
+            loyalty = 4,
+            health = 8,
+            cost = 12
+        }
+    }
+end
+
+-- Distribute crew members to different ports
+function GameState:distributeCrewToLocations()
+    -- Initialize location tables
+    self.crew.availableByLocation = {
+        ["Port Royal"] = {},
+        ["Nassau"] = {},
+        ["Havana"] = {},
+        ["Crown Colony"] = {}
+    }
+    
+    -- Helper function to check if a crew member is already in a location
+    local function isInAnyLocation(crewId)
+        for _, locationCrew in pairs(self.crew.availableByLocation) do
+            for _, id in ipairs(locationCrew) do
+                if id == crewId then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    
+    -- Helper function to get a crew member by role from pool
+    local function getCrewByRole(role)
+        local candidates = {}
+        for _, crew in ipairs(self.crew.pool) do
+            if crew.role == role and not isInAnyLocation(crew.id) then
+                table.insert(candidates, crew)
+            end
+        end
+        
+        if #candidates > 0 then
+            local selected = candidates[math.random(#candidates)]
+            return selected.id
+        end
+        return nil
+    end
+    
+    -- Assign crew by role patterns to each location
+    -- Port Royal: 1 of each role (Navigator, Gunner, Surgeon)
+    table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Navigator"))
+    table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Surgeon"))
+    
+    -- Nassau: 2 Gunners, 1 Navigator
+    table.insert(self.crew.availableByLocation["Nassau"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Nassau"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Nassau"], getCrewByRole("Navigator"))
+    
+    -- Havana: 2 Navigators, 1 Surgeon
+    table.insert(self.crew.availableByLocation["Havana"], getCrewByRole("Navigator"))
+    table.insert(self.crew.availableByLocation["Havana"], getCrewByRole("Navigator"))
+    table.insert(self.crew.availableByLocation["Havana"], getCrewByRole("Surgeon"))
+    
+    -- Crown Colony: 1 Surgeon, 1 Gunner, 1 Navigator
+    table.insert(self.crew.availableByLocation["Crown Colony"], getCrewByRole("Surgeon"))
+    table.insert(self.crew.availableByLocation["Crown Colony"], getCrewByRole("Gunner"))
+    table.insert(self.crew.availableByLocation["Crown Colony"], getCrewByRole("Navigator"))
+    
+    -- Remove nil entries (if we ran out of crew)
+    for location, crewList in pairs(self.crew.availableByLocation) do
+        for i = #crewList, 1, -1 do
+            if not crewList[i] then
+                table.remove(crewList, i)
+            end
+        end
+    end
+end
+
 -- Reset game state (for new game or restart)
 function GameState:reset()
     -- Reset ship
@@ -2607,6 +4202,11 @@ function GameState:reset()
     self.ship.x = 0
     self.ship.y = 0
     self.ship.isMoving = false
+    
+    -- Reset interface modes
+    self.settings.portMode = false
+    self.settings.currentPortScreen = "main"
+    self.settings.moored = false
     
     -- Reset time
     self.time.currentWeek = 1
@@ -2623,12 +4223,26 @@ function GameState:reset()
     self.resources.timber = 0
     self.resources.gunpowder = 0
     
+    -- Reset inventory
+    self.inventory.slots = {}
+    for i = 1, 10 do
+        self.inventory.slots[i] = {
+            item = nil,
+            quantity = 0
+        }
+    end
+    
     -- Reset crew
     self.crew.members = {}
     self.crew.morale = 5
     
+    -- Reinitialize the crew pool and distribution
+    self:initializeCrewPool()
+    self:distributeCrewToLocations()
+    
     -- Add default crew member (captain)
     table.insert(self.crew.members, {
+        id = "captain",
         name = "Captain",
         role = "Navigator",
         skill = 2,
@@ -2698,7 +4312,7 @@ function GameState:advanceTime(weeks)
     return not self.time.isGameOver  -- Return false if game is over
 end
 
--- Calculate travel time between zones based on wind
+-- Calculate travel time between zones based on wind and crew
 function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     -- Base travel time is always 1 week
     local baseTravelTime = 1
@@ -2709,10 +4323,22 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
         return baseTravelTime, "normal"
     end
     
-    -- Debug info for wind calculation
+    -- Debug info for travel calculation
     if self.settings.debug then
         print("Calculating travel time from zone " .. fromZoneIdx .. " to zone " .. toZoneIdx)
         print("Current wind direction: " .. self.environment.wind.currentDirection)
+    end
+    
+    -- Check for Navigator in crew (Ticket 2-6)
+    local hasNavigator = false
+    for _, crewMember in ipairs(self.crew.members) do
+        if crewMember.role == "Navigator" then
+            hasNavigator = true
+            if self.settings.debug then
+                print("Navigator found in crew: " .. crewMember.name)
+            end
+            break
+        end
     end
     
     -- For Sprint 1, we apply a simple wind modifier:
@@ -2803,10 +4429,23 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
         windModifier = 0
     end
     
-    -- Apply the wind modifier (ensure minimum 0.5 week)
-    local travelTime = math.max(0.5, baseTravelTime + windModifier)
+    -- Apply the wind modifier 
+    local travelTime = baseTravelTime + windModifier
     
-    -- Return both the travel time and the wind effect description
+    -- Apply navigator modifier if present
+    local navigatorEffect = ""
+    if hasNavigator then
+        travelTime = travelTime - 0.5
+        navigatorEffect = " with Navigator"
+        if self.settings.debug then
+            print("Navigator reducing travel time by 0.5 weeks")
+        end
+    end
+    
+    -- Ensure minimum 0.5 week travel time
+    travelTime = math.max(0.5, travelTime)
+    
+    -- Create wind effect description
     local windEffect = ""
     if windModifier > 0 then
         windEffect = "against wind"
@@ -2816,14 +4455,21 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
         windEffect = "crosswind"
     end
     
+    -- Combine wind and navigator effects
+    local totalEffect = windEffect
+    if hasNavigator then
+        totalEffect = totalEffect .. navigatorEffect
+    end
+    
     if self.settings.debug then
         print("Wind direction: " .. windDirection)
         print("Wind modifier: " .. windModifier)
+        print("Navigator effect: " .. (hasNavigator and "-0.5 weeks" or "none"))
         print("Final travel time: " .. travelTime .. " weeks")
-        print("Wind effect: " .. windEffect)
+        print("Total effect: " .. totalEffect)
     end
     
-    return travelTime, windEffect
+    return travelTime, totalEffect
 end
 
 -- Update ship position
@@ -2873,6 +4519,55 @@ function GameState:addCrewMember(member)
     return false
 end
 
+-- Get crew member from ID
+function GameState:getCrewMemberById(id)
+    for _, member in ipairs(self.crew.pool) do
+        if member.id == id then
+            return member
+        end
+    end
+    return nil
+end
+
+-- Get available crew at a location
+function GameState:getAvailableCrewAtLocation(locationName)
+    local result = {}
+    
+    -- Check if we have crew listed for this location
+    if not self.crew.availableByLocation[locationName] then
+        return result
+    end
+    
+    -- Get crew IDs at this location
+    local crewIds = self.crew.availableByLocation[locationName]
+    
+    -- Convert IDs to full crew member data
+    for _, id in ipairs(crewIds) do
+        local member = self:getCrewMemberById(id)
+        if member then
+            table.insert(result, member)
+        end
+    end
+    
+    return result
+end
+
+-- Remove a crew member from a location (e.g., when hired)
+function GameState:removeCrewFromLocation(crewId, locationName)
+    if not self.crew.availableByLocation[locationName] then
+        return false
+    end
+    
+    for i, id in ipairs(self.crew.availableByLocation[locationName]) do
+        if id == crewId then
+            table.remove(self.crew.availableByLocation[locationName], i)
+            return true
+        end
+    end
+    
+    return false
+end
+
 -- Change faction reputation
 function GameState:changeFactionRep(faction, amount)
     if self.factions[faction] then
@@ -2903,6 +4598,7 @@ local gameState = require('gameState')
 local gameMap = require('map')
 local playerShip = require('ship')
 local timeSystem = require('time')
+local portRoyal = require('portRoyal')
 
 function love.load()
     -- Load game assets and initialize states
@@ -2918,6 +4614,7 @@ function love.load()
     timeSystem:load(gameState)  -- Initialize time tracking
     gameMap:load(gameState)     -- Initialize map 
     playerShip:load(gameState, gameMap)  -- Initialize ship
+    portRoyal:load(gameState)   -- Initialize Port Royal interface
     
     -- Set window properties
     love.window.setTitle("Pirate's Wager: Blood for Gold")
@@ -2932,8 +4629,16 @@ function love.update(dt)
     if gameState.settings.isPaused then return end
     
     -- Update game state
-    gameMap:update(dt, gameState)
-    playerShip:update(dt, gameState, gameMap)
+    if gameState.settings.portMode then
+        -- Update port interface
+        portRoyal:update(dt, gameState)
+    else
+        -- Update map and ship
+        gameMap:update(dt, gameState)
+        playerShip:update(dt, gameState, gameMap)
+    end
+    
+    -- Always update time system
     timeSystem:update(dt, gameState)
     
     -- Handle game restart
@@ -2942,13 +4647,22 @@ function love.update(dt)
         timeSystem:load(gameState)  -- Reinitialize systems
         gameMap:load(gameState)
         playerShip:load(gameState, gameMap)
+        portRoyal:load(gameState)
     end
 end
 
 function love.draw()
-    -- Render game
-    gameMap:draw(gameState)
-    playerShip:draw(gameState)
+    -- Render game based on current mode
+    if gameState.settings.portMode then
+        -- Draw port interface
+        portRoyal:draw(gameState)
+    else
+        -- Draw map and ship
+        gameMap:draw(gameState)
+        playerShip:draw(gameState)
+    end
+    
+    -- Always draw time system
     timeSystem:draw(gameState)
     
     -- Display fps in debug mode
@@ -2959,17 +4673,32 @@ function love.draw()
 end
 
 function love.mousemoved(x, y)
-    gameMap:mousemoved(x, y, gameState)
+    if gameState.settings.portMode then
+        portRoyal:mousemoved(x, y, gameState)
+    else
+        gameMap:mousemoved(x, y, gameState)
+    end
 end
 
 function love.mousepressed(x, y, button)
     if gameState.time.isGameOver then return end
-    gameMap:mousepressed(x, y, button, gameState)
+    
+    if gameState.settings.portMode then
+        portRoyal:mousepressed(x, y, button, gameState)
+    else
+        gameMap:mousepressed(x, y, button, gameState)
+    end
 end
 
 function love.keypressed(key)
     if key == "escape" then
-        love.event.quit()
+        -- If in port mode, return to map
+        if gameState.settings.portMode then
+            gameState.settings.portMode = false
+            gameState.settings.currentPortScreen = "main"
+        else
+            love.event.quit()
+        end
     elseif key == "f1" then
         gameState.settings.debug = not gameState.settings.debug
     elseif key == "p" then
@@ -3252,7 +4981,11 @@ function Map:draw(gameState)
         
         local tooltipText
         if self.hoveredZone == gameState.ship.currentZone then
-            tooltipText = zone.name .. "\n" .. zone.description .. "\nCurrent location"
+            if gameState.settings.moored then
+                tooltipText = zone.name .. "\n" .. zone.description .. "\nCurrently moored at this location\n(Click to enter " .. zone.name .. " interface)"
+            else
+                tooltipText = zone.name .. "\n" .. zone.description .. "\nCurrently at sea near this location\n(Click to moor at " .. zone.name .. ")"
+            end
         elseif isAdjacent then
             -- Calculate travel time with wind effects
             local travelTime, windEffect = gameState:calculateTravelTime(gameState.ship.currentZone, self.hoveredZone, self)
@@ -3330,11 +5063,27 @@ function Map:draw(gameState)
                 end
             end
         end
+        
+        -- Draw mooring indicator if ship is moored
+        if gameState.settings.moored then
+            love.graphics.setColor(1, 1, 0.3, 0.8)  -- Yellow anchor indicator
+            love.graphics.circle("fill", centerX1, centerY1 + 25, 5)
+            love.graphics.setColor(0, 0, 0, 0.8)
+            love.graphics.circle("line", centerX1, centerY1 + 25, 5)
+        end
     end
     
     -- Display instructions
     love.graphics.setColor(1, 1, 1, 0.7)
-    love.graphics.printf("Hover over zones to see information\nClick adjacent zones to sail there", 10, self.height - 50, 300, "left")
+    
+    local instructionText = "Hover over zones to see information\nClick adjacent zones to sail there"
+    if gameState.ship.currentZone and not gameState.settings.moored then
+        instructionText = instructionText .. "\nClick your current zone to moor your ship"
+    elseif gameState.ship.currentZone and gameState.settings.moored then
+        instructionText = instructionText .. "\nClick your current zone to enter port interface"
+    end
+    
+    love.graphics.printf(instructionText, 10, self.height - 70, 300, "left")
 end
 
 -- Handle mouse movement
@@ -3388,6 +5137,21 @@ function Map:mousepressed(x, y, button, gameState)
             -- Get the Ship module and call moveToZone
             local Ship = require('ship')
             Ship:moveToZone(clickedZone, gameState, self)
+        else
+            -- Clicked on current zone
+            local currentZone = self.zones[gameState.ship.currentZone]
+            
+            -- When clicking on current zone, show mooring options
+            if not gameState.settings.moored then
+                -- If not moored, offer to moor at this location
+                print("Mooring at " .. currentZone.name)
+                gameState.settings.moored = true
+            else
+                -- If already moored, enter the location interface
+                print("Entering " .. currentZone.name .. " interface")
+                gameState.settings.portMode = true
+                gameState.settings.currentPortScreen = "main"
+            end
         end
     end
 end
@@ -3430,6 +5194,914 @@ function Map:areZonesAdjacent(zoneIndex1, zoneIndex2)
 end
 
 return Map```
+
+## src/portRoyal.lua
+```lua
+-- Port Interface Module
+-- Currently focused on Port Royal but can be extended to all locations
+
+local PortRoyal = {
+    -- UI constants
+    width = 800,
+    height = 600,
+    
+    -- UI elements
+    buttons = {},
+    
+    -- Placeholder art
+    backgrounds = {
+        main = nil,
+        tavern = nil,
+        shipyard = nil
+    },
+    
+    -- Currently displayed crew (loaded dynamically based on location)
+    availableCrew = {},
+    
+    -- Tavern status indicators
+    tavernMessage = nil,
+    tavernMessageTimer = 0,
+}
+
+-- Initialize Port interface
+function PortRoyal:load(gameState)
+    -- Main screen buttons will be generated dynamically based on location
+    self.buttons.main = {}
+    
+    -- Initialize buttons for tavern screen (just the back button initially)
+    self.buttons.tavern = {
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() 
+                gameState.settings.currentPortScreen = "main" 
+                -- Clear crew list when leaving tavern
+                self.availableCrew = {}
+            end
+        }
+    }
+    
+    -- Initialize buttons for shipyard screen
+    self.buttons.shipyard = {
+        {
+            text = "Repair Ship",
+            x = 325,
+            y = 300,
+            width = 150,
+            height = 50,
+            action = function() 
+                -- For now, just display a message that repairs aren't available yet
+                print("Ship repairs not yet implemented")
+                self.shipyardMessage = "Ship repairs will be available in a future update."
+                self.shipyardMessageTimer = 3  -- Show message for 3 seconds
+            end
+        },
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "main" end
+        }
+    }
+    
+    -- Variables for shipyard message display
+    self.shipyardMessage = nil
+    self.shipyardMessageTimer = 0
+    
+    -- Initialize buttons for crew screen
+    self.buttons.crew = {
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "main" end
+        }
+    }
+    
+    -- Initialize buttons for inventory screen
+    self.buttons.inventory = {
+        {
+            text = "Back to Port",
+            x = 325,
+            y = 500,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "main" end
+        }
+    }
+    
+    -- Load placeholder background images if available
+    local success, result = pcall(function()
+        return love.graphics.newImage("assets/port_royal_main.png")
+    end)
+    if success then
+        self.backgrounds.main = result
+        print("Port Royal main background loaded")
+    end
+    
+    -- Load tavern background
+    local success, result = pcall(function()
+        return love.graphics.newImage("assets/port-royal-tavern.png")
+    end)
+    if success then
+        self.backgrounds.tavern = result
+        print("Port Royal tavern background loaded")
+    end
+    
+    -- Load shipyard background
+    local success, result = pcall(function()
+        return love.graphics.newImage("assets/port-royal-shipyard.png")
+    end)
+    if success then
+        self.backgrounds.shipyard = result
+        print("Port Royal shipyard background loaded")
+    end
+end
+
+-- Update Port interface
+function PortRoyal:update(dt, gameState)
+    -- Generate location-specific buttons if needed
+    self:generateLocationButtons(gameState)
+    
+    -- Load crew members for the current location if entering tavern
+    local currentScreen = gameState.settings.currentPortScreen
+    if currentScreen == "tavern" and #self.availableCrew == 0 then
+        self:loadAvailableCrewForLocation(gameState)
+    end
+    
+    -- Check if we need to reload any assets
+    if not self.backgrounds.tavern then
+        -- Try to load tavern background
+        local success, result = pcall(function()
+            return love.graphics.newImage("assets/port-royal-tavern.png")
+        end)
+        if success then
+            self.backgrounds.tavern = result
+            print("Port Royal tavern background loaded during update")
+        end
+    end
+    
+    if not self.backgrounds.shipyard then
+        -- Try to load shipyard background
+        local success, result = pcall(function()
+            return love.graphics.newImage("assets/port-royal-shipyard.png")
+        end)
+        if success then
+            self.backgrounds.shipyard = result
+            print("Port Royal shipyard background loaded during update")
+        end
+    end
+    
+    -- Update shipyard message timer
+    if self.shipyardMessage and self.shipyardMessageTimer > 0 then
+        self.shipyardMessageTimer = self.shipyardMessageTimer - dt
+        if self.shipyardMessageTimer <= 0 then
+            self.shipyardMessage = nil
+        end
+    end
+    
+    -- Update tavern message timer
+    if self.tavernMessage and self.tavernMessageTimer > 0 then
+        self.tavernMessageTimer = self.tavernMessageTimer - dt
+        if self.tavernMessageTimer <= 0 then
+            self.tavernMessage = nil
+        end
+    end
+end
+
+-- Load crew members available at the current location
+function PortRoyal:loadAvailableCrewForLocation(gameState)
+    -- Clear current list
+    self.availableCrew = {}
+    
+    -- Get current location
+    local currentZoneIndex = gameState.ship.currentZone
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up location info
+    if currentZoneIndex and currentZoneIndex > 0 then
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+            
+            -- Get available crew at this location
+            self.availableCrew = gameState:getAvailableCrewAtLocation(currentZoneName)
+            
+            -- Update the tavern buttons for these crew members
+            self:updateTavernButtons(gameState, currentZoneName)
+        end
+    end
+end
+
+-- Update the tavern buttons for the available crew members
+function PortRoyal:updateTavernButtons(gameState, locationName)
+    -- Keep the back button (it should be the last button)
+    local backButton = self.buttons.tavern[#self.buttons.tavern]
+    
+    -- Clear all other buttons
+    self.buttons.tavern = {}
+    
+    -- Add hire buttons for each available crew member
+    for i, crew in ipairs(self.availableCrew) do
+        table.insert(self.buttons.tavern, {
+            text = "Hire for " .. crew.cost .. " gold",
+            x = 500,
+            y = 190 + (i-1) * 100 + 20,
+            width = 200,
+            height = 40,
+            crewId = crew.id,  -- Store crew ID for hiring
+            action = function()
+                -- Check if can afford the crew member
+                if not gameState:canAfford("gold", crew.cost) then
+                    self.tavernMessage = "Not enough gold to hire " .. crew.name
+                    self.tavernMessageTimer = 3
+                    return
+                end
+                
+                -- Check if crew is full
+                if #gameState.crew.members >= gameState.ship.crewCapacity then
+                    self.tavernMessage = "Ship crew capacity reached"
+                    self.tavernMessageTimer = 3
+                    return
+                end
+                
+                -- Hire the crew member
+                gameState:spendResources("gold", crew.cost)
+                
+                -- Create a copy of the crew member to add to the player's crew
+                local newCrewMember = {
+                    id = crew.id,
+                    name = crew.name,
+                    role = crew.role,
+                    skill = crew.skill,
+                    loyalty = crew.loyalty,
+                    health = crew.health
+                }
+                
+                -- Add to player's crew
+                gameState:addCrewMember(newCrewMember)
+                
+                -- Remove from location
+                gameState:removeCrewFromLocation(crew.id, locationName)
+                
+                -- Success message
+                self.tavernMessage = crew.name .. " hired successfully!"
+                self.tavernMessageTimer = 3
+                
+                -- Update available crew and buttons
+                self.availableCrew = gameState:getAvailableCrewAtLocation(locationName)
+                self:updateTavernButtons(gameState, locationName)
+            end
+        })
+    end
+    
+    -- Add back button
+    table.insert(self.buttons.tavern, backButton)
+end
+
+-- Generate buttons based on the current location
+function PortRoyal:generateLocationButtons(gameState)
+    -- Get current location
+    local currentZoneIndex = gameState.ship.currentZone
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up location info
+    if currentZoneIndex and currentZoneIndex > 0 then
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+        end
+    end
+    
+    -- Clear existing buttons
+    self.buttons.main = {}
+    
+    -- Generate basic "Set Sail" button for all locations
+    table.insert(self.buttons.main, {
+        text = "Set Sail",
+        x = 325,
+        y = 400,
+        width = 150,
+        height = 50,
+        action = function() 
+            gameState.settings.portMode = false 
+            gameState.settings.moored = false
+            print("Setting sail from " .. currentZoneName)
+        end
+    })
+    
+    -- Add location-specific buttons
+    if currentZoneName == "Port Royal" then
+        -- Port Royal has the full set of options
+        table.insert(self.buttons.main, {
+            text = "Tavern",
+            x = 200,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "tavern" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Shipyard",
+            x = 200,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "shipyard" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Crew",
+            x = 450,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "crew" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Inventory",
+            x = 450,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "inventory" end
+        })
+    elseif currentZoneName == "Nassau" then
+        -- Nassau has a tavern and crew management
+        table.insert(self.buttons.main, {
+            text = "Pirate Tavern",
+            x = 325,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "tavern" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Crew",
+            x = 325,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "crew" end
+        })
+    elseif currentZoneName == "Havana" then
+        -- Havana has a tavern and shipyard
+        table.insert(self.buttons.main, {
+            text = "Spanish Tavern",
+            x = 325,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "tavern" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Shipyard",
+            x = 325,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "shipyard" end
+        })
+    elseif currentZoneName == "Crown Colony" then
+        -- Crown Colony has a shipyard and inventory
+        table.insert(self.buttons.main, {
+            text = "Royal Shipyard",
+            x = 325,
+            y = 200,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "shipyard" end
+        })
+        
+        table.insert(self.buttons.main, {
+            text = "Inventory",
+            x = 325,
+            y = 270,
+            width = 150,
+            height = 50,
+            action = function() gameState.settings.currentPortScreen = "inventory" end
+        })
+    end
+    
+    -- For all locations, ensure "Set Sail" is at the bottom
+    if #self.buttons.main > 0 then
+        for i, button in ipairs(self.buttons.main) do
+            if button.text == "Set Sail" then
+                button.y = 400  -- Position at bottom
+            end
+        end
+    end
+end
+
+-- Draw Port interface
+function PortRoyal:draw(gameState)
+    -- Get current screen and location
+    local currentScreen = gameState.settings.currentPortScreen
+    local currentZoneIndex = gameState.ship.currentZone
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up the current zone name
+    if currentZoneIndex and currentZoneIndex > 0 then
+        -- Get the Map module to look up zone name
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+        end
+    end
+    
+    -- Draw background based on current screen
+    self:drawBackground(currentScreen)
+    
+    -- Draw gold amount
+    love.graphics.setColor(1, 0.9, 0.2, 1)  -- Gold color
+    love.graphics.print("Gold: " .. gameState.resources.gold, 10, 10)
+    
+    -- Draw screen-specific content
+    if currentScreen == "main" then
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf(currentZoneName .. " Harbor", 0, 100, self.width, "center")
+        
+        -- Draw ship name and class
+        love.graphics.printf("Ship: " .. gameState.ship.name .. " (" .. gameState.ship.class .. ")", 0, 130, self.width, "center")
+        
+        -- Draw location-specific welcome message
+        local welcomeMessage = "Welcome to port. What would you like to do?"
+        
+        if currentZoneName == "Port Royal" then
+            welcomeMessage = "Welcome to Port Royal, the pirate haven of the Caribbean."
+        elseif currentZoneName == "Nassau" then
+            welcomeMessage = "Welcome to Nassau, the lawless pirate stronghold."
+        elseif currentZoneName == "Havana" then
+            welcomeMessage = "Welcome to Havana, the jewel of Spanish colonies."
+        elseif currentZoneName == "Crown Colony" then
+            welcomeMessage = "Welcome to the Crown Colony, an outpost of British influence."
+        elseif currentZoneName:find("Waters") then
+            welcomeMessage = "Your ship is anchored in open waters. Not much to do here."
+        elseif currentZoneName:find("Bay") or currentZoneName:find("Reach") then
+            welcomeMessage = "You've moored at a secluded spot with no settlements."
+        end
+        
+        love.graphics.setColor(1, 0.95, 0.8, 1)  -- Light cream color
+        love.graphics.printf(welcomeMessage, 50, 160, self.width - 100, "center")
+        
+        -- Draw buttons for main screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "tavern" then
+        -- Get current location for tavern name
+        local currentZoneIndex = gameState.ship.currentZone
+        local tavernName = "The Rusty Anchor Tavern"
+        local tavernDescription = "The tavern is filled with sailors, merchants, and pirates.\nHere you can recruit crew members and hear rumors."
+        
+        -- Set location-specific tavern names
+        if currentZoneIndex and currentZoneIndex > 0 then
+            local Map = require('map')
+            local zone = Map:getZone(currentZoneIndex)
+            if zone then
+                if zone.name == "Nassau" then
+                    tavernName = "The Black Flag Tavern"
+                    tavernDescription = "A rowdy establishment frequented by pirates.\nRecruit dangerous but skilled crew members here."
+                elseif zone.name == "Havana" then
+                    tavernName = "La Cantina del Rey"
+                    tavernDescription = "An elegant Spanish tavern with fine wines.\nHear rumors about Spanish treasure fleets here."
+                end
+            end
+        end
+        
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf(tavernName, 0, 50, self.width, "center")
+        
+        -- If the background image doesn't include text, draw it manually
+        if not self.backgrounds.tavern then
+            love.graphics.printf(tavernDescription, 0, 120, self.width, "center")
+        end
+        
+        -- Draw available crew for hire
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Available Crew for Hire:", 0, 160, self.width, "center")
+        
+        -- Draw table header
+        love.graphics.setColor(0.8, 0.7, 0.5, 1)
+        love.graphics.print("Name", 100, 190)
+        love.graphics.print("Role", 250, 190)
+        love.graphics.print("Stats", 350, 190)
+        
+        -- Draw available crew members
+        for i, crew in ipairs(self.availableCrew) do
+            local yPos = 190 + (i-1) * 100  -- Increased vertical spacing
+            
+            -- Background panel for each crew member (including hire button area)
+            love.graphics.setColor(0.2, 0.2, 0.3, 0.6)
+            love.graphics.rectangle("fill", 90, yPos, 620, 80)
+            love.graphics.setColor(0.4, 0.4, 0.5, 0.8)
+            love.graphics.rectangle("line", 90, yPos, 620, 80)
+            
+            -- Display crew info
+            love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            love.graphics.print(crew.name, 100, yPos + 10)
+            
+            -- Color code the role to match the crew management screen
+            if crew.role == "Navigator" then
+                love.graphics.setColor(0.7, 1, 0.7, 1)  -- Green for navigators
+            elseif crew.role == "Gunner" then
+                love.graphics.setColor(1, 0.7, 0.7, 1)  -- Red for gunners
+            elseif crew.role == "Surgeon" then
+                love.graphics.setColor(0.7, 0.7, 1, 1)  -- Blue for surgeons
+            else
+                love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            end
+            
+            love.graphics.print(crew.role, 250, yPos + 10)
+            
+            -- Display crew stats
+            love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            love.graphics.print("Skill: " .. crew.skill, 350, yPos + 10)
+            love.graphics.print("Loyalty: " .. crew.loyalty, 350, yPos + 30)
+            love.graphics.print("Health: " .. crew.health, 350, yPos + 50)
+            
+            -- Display hire cost
+            love.graphics.setColor(1, 0.9, 0.2, 1)
+            love.graphics.print("Cost: " .. crew.cost .. " gold", 100, yPos + 50)
+            
+            -- Draw integrated hire button (right side of panel)
+            love.graphics.setColor(0.3, 0.5, 0.7, 0.9)
+            love.graphics.rectangle("fill", 500, yPos + 20, 200, 40)
+            love.graphics.setColor(0.5, 0.7, 0.9, 1)
+            love.graphics.rectangle("line", 500, yPos + 20, 200, 40)
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.printf("Hire for " .. crew.cost .. " gold", 500, yPos + 33, 200, "center")
+        end
+        
+        -- Show player's current gold
+        love.graphics.setColor(1, 0.9, 0.2, 1)
+        love.graphics.printf("Your gold: " .. gameState.resources.gold, 0, 440, self.width, "center")
+        
+        -- Display crew capacity
+        love.graphics.setColor(0.7, 0.85, 1, 1)
+        love.graphics.printf("Ship Crew: " .. #gameState.crew.members .. "/" .. gameState.ship.crewCapacity, 0, 470, self.width, "center")
+        
+        -- Display tavern message if active
+        if self.tavernMessage then
+            love.graphics.setColor(0, 0, 0, 0.7)
+            love.graphics.rectangle("fill", 150, 380, 500, 40)
+            love.graphics.setColor(1, 1, 0, 1)
+            love.graphics.printf(self.tavernMessage, 150, 390, 500, "center")
+        end
+        
+        -- Draw buttons for tavern screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "shipyard" then
+        -- Get current location for shipyard name
+        local currentZoneIndex = gameState.ship.currentZone
+        local shipyardName = "Port Royal Shipyard"
+        local shipyardDescription = "The shipyard is busy with workers repairing vessels.\nHere you can upgrade your ship or purchase a new one."
+        
+        -- Set location-specific shipyard names
+        if currentZoneIndex and currentZoneIndex > 0 then
+            local Map = require('map')
+            local zone = Map:getZone(currentZoneIndex)
+            if zone then
+                if zone.name == "Havana" then
+                    shipyardName = "Havana Naval Yards"
+                    shipyardDescription = "A Spanish shipyard specializing in galleons.\nSpanish vessels are sturdy but more expensive."
+                elseif zone.name == "Crown Colony" then
+                    shipyardName = "Royal Navy Dockyard"
+                    shipyardDescription = "A military shipyard with British vessels.\nStrict regulations, but high-quality ships available."
+                end
+            end
+        end
+        
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf(shipyardName, 0, 50, self.width, "center")
+        
+        -- If the background image doesn't include text, draw it manually
+        if not self.backgrounds.shipyard then
+            love.graphics.printf(shipyardDescription, 0, 150, self.width, "center")
+        end
+        
+        -- Draw current ship status
+        love.graphics.setColor(0.8, 0.8, 1, 1)
+        love.graphics.printf("Current Ship: " .. gameState.ship.name .. " (" .. gameState.ship.class .. ")", 0, 220, self.width, "center")
+        love.graphics.printf("Hull Durability: " .. gameState.ship.durability .. "/10", 0, 250, self.width, "center")
+        
+        -- Draw shipyard message if active
+        if self.shipyardMessage then
+            love.graphics.setColor(0, 0, 0, 0.7)
+            love.graphics.rectangle("fill", 150, 380, 500, 40)
+            love.graphics.setColor(1, 1, 0, 1)
+            love.graphics.printf(self.shipyardMessage, 150, 390, 500, "center")
+        end
+        
+        -- Draw buttons for shipyard screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "crew" then
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Crew Management", 0, 70, self.width, "center")
+        
+        -- Draw crew info
+        love.graphics.setColor(0.7, 0.85, 1, 1)
+        love.graphics.printf("Crew Size: " .. #gameState.crew.members .. "/" .. gameState.ship.crewCapacity, 0, 110, self.width, "center")
+        love.graphics.printf("Crew Morale: " .. gameState.crew.morale .. "/10", 0, 140, self.width, "center")
+        
+        -- Draw crew table headers
+        love.graphics.setColor(1, 0.9, 0.7, 1)
+        love.graphics.print("Name", 130, 180)
+        love.graphics.print("Role", 300, 180)
+        love.graphics.print("Skill", 450, 180)
+        love.graphics.print("Loyalty", 520, 180)
+        love.graphics.print("Health", 600, 180)
+        
+        -- Draw table separator
+        love.graphics.setColor(0.6, 0.6, 0.7, 1)
+        love.graphics.line(120, 200, 680, 200)
+        
+        -- List crew members with stats in a table format
+        love.graphics.setColor(0.9, 0.9, 0.9, 1)
+        local yPos = 210
+        for i, member in ipairs(gameState.crew.members) do
+            -- Highlight navigator role for ticket 2-6 visibility
+            if member.role == "Navigator" then
+                love.graphics.setColor(0.7, 1, 0.7, 1)  -- Green for navigators
+            else
+                love.graphics.setColor(0.9, 0.9, 0.9, 1)
+            end
+            
+            love.graphics.print(member.name, 130, yPos)
+            love.graphics.print(member.role, 300, yPos)
+            love.graphics.print(member.skill or 1, 450, yPos)
+            love.graphics.print(member.loyalty or 5, 520, yPos)
+            love.graphics.print(member.health or 10, 600, yPos)
+            
+            -- Draw separator between crew members
+            love.graphics.setColor(0.3, 0.3, 0.4, 0.5)
+            love.graphics.line(120, yPos + 25, 680, yPos + 25)
+            
+            yPos = yPos + 40
+        end
+        
+        -- Draw empty slots if not at capacity
+        for i = #gameState.crew.members + 1, gameState.ship.crewCapacity do
+            love.graphics.setColor(0.4, 0.4, 0.5, 0.5)
+            love.graphics.print("Empty slot", 130, yPos)
+            love.graphics.line(120, yPos + 25, 680, yPos + 25)
+            yPos = yPos + 40
+        end
+        
+        -- Draw role effects information
+        love.graphics.setColor(0.9, 0.8, 0.6, 1)
+        love.graphics.printf("Crew Role Effects:", 150, 400, 500, "center")
+        
+        love.graphics.setColor(0.7, 1, 0.7, 1)
+        love.graphics.printf("Navigator: Reduces travel time between zones by 0.5 weeks", 150, 430, 500, "center")
+        
+        -- Draw buttons for crew screen
+        self:drawButtons(currentScreen)
+    
+    elseif currentScreen == "inventory" then
+        -- Draw title
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Inventory", 0, 70, self.width, "center")
+        
+        -- Draw resources section
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Resources:", 100, 120, 200, "left")
+        
+        -- Draw resources
+        love.graphics.setColor(0.9, 0.9, 0.9, 1)
+        love.graphics.print("Gold: " .. gameState.resources.gold, 120, 150)
+        love.graphics.print("Rum: " .. gameState.resources.rum, 120, 180)
+        love.graphics.print("Timber: " .. gameState.resources.timber, 120, 210)
+        love.graphics.print("Gunpowder: " .. gameState.resources.gunpowder, 120, 240)
+        
+        -- Draw cargo slots section
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("Cargo Slots:", 400, 120, 200, "left")
+        
+        -- Draw cargo slots (10 slots)
+        local slotSize = 50
+        local startX = 400
+        local startY = 150
+        local cols = 5
+        
+        for i = 1, 10 do
+            local row = math.floor((i-1) / cols)
+            local col = (i-1) % cols
+            local x = startX + col * (slotSize + 10)
+            local y = startY + row * (slotSize + 10)
+            
+            -- Draw slot background
+            love.graphics.setColor(0.2, 0.2, 0.3, 1)
+            love.graphics.rectangle("fill", x, y, slotSize, slotSize)
+            
+            -- Draw slot border
+            love.graphics.setColor(0.4, 0.4, 0.5, 1)
+            love.graphics.rectangle("line", x, y, slotSize, slotSize)
+            
+            -- Draw slot content if any
+            local slot = gameState.inventory.slots[i]
+            if slot and slot.item then
+                love.graphics.setColor(0.9, 0.9, 0.9, 1)
+                love.graphics.printf(slot.item, x, y + 10, slotSize, "center")
+                love.graphics.printf(slot.quantity, x, y + 30, slotSize, "center")
+            else
+                -- Draw empty slot number
+                love.graphics.setColor(0.5, 0.5, 0.5, 0.5)
+                love.graphics.printf(i, x + 15, y + 15, 20, "center")
+            end
+        end
+        
+        -- Debug button for adding resources (if debug mode enabled)
+        if gameState.settings.debug then
+            love.graphics.setColor(0.3, 0.6, 0.3, 1)
+            love.graphics.rectangle("fill", 120, 270, 150, 30)
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.printf("+ 10 of each resource", 120, 275, 150, "center")
+        end
+        
+        -- Draw buttons for inventory screen
+        self:drawButtons(currentScreen)
+    end
+end
+
+-- Helper function to draw background
+function PortRoyal:drawBackground(screen)
+    -- Set color
+    love.graphics.setColor(1, 1, 1, 1)
+    
+    -- Get current location
+    local currentZoneIndex = nil
+    local currentZoneName = "Unknown Location"
+    
+    -- Look up location info
+    if _G.gameState and _G.gameState.ship then
+        currentZoneIndex = _G.gameState.ship.currentZone
+    end
+    
+    if currentZoneIndex and currentZoneIndex > 0 then
+        local Map = require('map')
+        local zone = Map:getZone(currentZoneIndex)
+        if zone then
+            currentZoneName = zone.name
+        end
+    end
+    
+    -- Try to load location-specific background if available
+    local locationKey = currentZoneName:lower():gsub("%s+", "_")
+    local locationBackground = nil
+    
+    if screen == "main" then
+        local success, result = pcall(function()
+            return love.graphics.newImage("assets/" .. locationKey .. "_main.png")
+        end)
+        if success then
+            locationBackground = result
+        end
+    end
+    
+    -- Check if we have a background image for this screen
+    if locationBackground then
+        -- We have a location-specific background
+        love.graphics.draw(locationBackground, 0, 0)
+    elseif screen == "main" and self.backgrounds.main then
+        -- Fall back to generic port background
+        love.graphics.draw(self.backgrounds.main, 0, 0)
+    elseif screen == "tavern" and self.backgrounds.tavern then
+        love.graphics.draw(self.backgrounds.tavern, 0, 0)
+    elseif screen == "shipyard" and self.backgrounds.shipyard then
+        love.graphics.draw(self.backgrounds.shipyard, 0, 0)
+    else
+        -- Draw a fallback colored background
+        if screen == "main" then
+            -- Based on zone type (could become more sophisticated)
+            if currentZoneName == "Port Royal" then
+                love.graphics.setColor(0.2, 0.3, 0.5, 1)  -- Deep blue for Port Royal
+            elseif currentZoneName:find("Waters") then
+                love.graphics.setColor(0.2, 0.4, 0.5, 1)  -- Different blue for waters
+            elseif currentZoneName == "Nassau" or currentZoneName == "Havana" then
+                love.graphics.setColor(0.5, 0.3, 0.2, 1)  -- Brown for settlements
+            else
+                love.graphics.setColor(0.3, 0.3, 0.4, 1)  -- Default color
+            end
+        elseif screen == "tavern" then
+            love.graphics.setColor(0.3, 0.2, 0.1, 1)  -- Brown for tavern
+        elseif screen == "shipyard" then
+            love.graphics.setColor(0.4, 0.4, 0.5, 1)  -- Grey for shipyard
+        elseif screen == "crew" then
+            love.graphics.setColor(0.2, 0.3, 0.4, 1)  -- Navy for crew
+        elseif screen == "inventory" then
+            love.graphics.setColor(0.3, 0.3, 0.3, 1)  -- Grey for inventory
+        end
+        
+        -- Fill background
+        love.graphics.rectangle("fill", 0, 0, self.width, self.height)
+    end
+end
+
+-- Helper function to draw buttons
+function PortRoyal:drawButtons(screen)
+    -- Only draw buttons for the current screen
+    if not self.buttons[screen] then
+        return
+    end
+    
+    -- Position the "Back to Port" button at the bottom for non-main screens
+    if screen ~= "main" and #self.buttons[screen] == 1 and 
+       self.buttons[screen][1].text == "Back to Port" then
+        self.buttons[screen][1].y = 520
+    end
+    
+    for _, button in ipairs(self.buttons[screen]) do
+        -- Draw button background
+        love.graphics.setColor(0.4, 0.4, 0.6, 1)
+        love.graphics.rectangle("fill", button.x, button.y, button.width, button.height, 5, 5)
+        
+        -- Draw button border
+        love.graphics.setColor(0.6, 0.6, 0.8, 1)
+        love.graphics.rectangle("line", button.x, button.y, button.width, button.height, 5, 5)
+        
+        -- Draw button text
+        love.graphics.setColor(1, 1, 1, 1)
+        local font = love.graphics.getFont()
+        local textWidth = font:getWidth(button.text)
+        local textHeight = font:getHeight()
+        love.graphics.print(
+            button.text,
+            button.x + (button.width/2) - (textWidth/2),
+            button.y + (button.height/2) - (textHeight/2)
+        )
+    end
+end
+
+-- Handle mouse movement
+function PortRoyal:mousemoved(x, y, gameState)
+    -- Could implement hover effects for buttons here
+end
+
+-- Handle mouse clicks
+function PortRoyal:mousepressed(x, y, button, gameState)
+    if button ~= 1 then  -- Only process left clicks
+        return
+    end
+    
+    local currentScreen = gameState.settings.currentPortScreen
+    
+    -- Print debug info
+    if gameState.settings.debug then
+        print("Port Royal screen click at: " .. x .. ", " .. y .. " on screen: " .. currentScreen)
+    end
+    
+    -- Special handling for inventory debug button
+    if currentScreen == "inventory" and gameState.settings.debug then
+        if x >= 120 and x <= 270 and y >= 270 and y <= 300 then
+            -- Debug button for adding resources
+            gameState.resources.gold = gameState.resources.gold + 10
+            gameState.resources.rum = gameState.resources.rum + 10
+            gameState.resources.timber = gameState.resources.timber + 10
+            gameState.resources.gunpowder = gameState.resources.gunpowder + 10
+            print("DEBUG: Added 10 of each resource")
+            return
+        end
+    end
+    
+    -- Check if any button was clicked
+    if self.buttons[currentScreen] then
+        for i, btn in ipairs(self.buttons[currentScreen]) do
+            if x >= btn.x and x <= btn.x + btn.width and
+               y >= btn.y and y <= btn.y + btn.height then
+                -- Button was clicked, execute its action
+                if btn.action then
+                    if gameState.settings.debug then
+                        print("Button clicked: " .. btn.text)
+                    end
+                    btn.action()
+                end
+                return
+            end
+        end
+    end
+end
+
+return PortRoyal```
 
 ## src/ship.lua
 ```lua
@@ -3502,6 +6174,9 @@ function Ship:update(dt, gameState, gameMap)
             gameState.ship.y = self.targetY
             gameState:setShipMoving(false)
             print("Ship arrived at " .. gameMap.zones[gameState.ship.currentZone].name)
+            
+            -- We're now at the destination, but not yet moored
+            gameState.settings.moored = false
         end
     end
 end
@@ -3598,6 +6273,10 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
             
             -- Actually advance the game time
             gameState:advanceTime(travelTime)
+            
+            -- We no longer automatically enter Port Royal
+            -- This will be handled by the mooring system instead
+            
             return true
         else
             print("Cannot move to " .. targetZone.name .. " - not adjacent to current zone")
@@ -3750,6 +6429,155 @@ end
 return TimeSystem```
 
 # Documentation
+
+## docs/CrewSystem.md
+# Crew System Documentation
+
+## Overview
+
+The crew management system tracks individual crew members, their distribution across different locations, and their effects on gameplay. It serves as the foundation for the staffing and personnel aspects of the game, encompassing recruitment, character progression, and gameplay effects like the Navigator's travel time reduction.
+
+## Architecture
+
+### Core Components
+
+The crew system is built around several key components:
+
+1. **Global Crew Pool**: A master list of all potential crew members in the game
+2. **Location-Based Availability**: Tracking which crew members are available at which port locations
+3. **Player's Crew Roster**: The collection of crew members currently serving on the player's ship
+4. **Role-Based Effects**: Gameplay modifications based on crew roles (e.g., Navigators reducing travel time)
+
+### Data Structures
+
+#### Crew Member Object
+
+Each crew member is a uniquely identifiable entity with a set of properties:
+
+```lua
+crewMember = {
+    id = "js001",             -- Unique identifier
+    name = "Jack Sparrow",    -- Display name
+    role = "Navigator",       -- Role (Navigator, Gunner, Surgeon)
+    skill = 3,                -- Skill level (1-5)
+    loyalty = 4,              -- Loyalty to player (1-10)
+    health = 8,               -- Health status (1-10)
+    cost = 25                 -- Recruitment cost in gold
+}
+```
+
+#### GameState Crew Data
+
+The crew data is stored within the central GameState:
+
+```lua
+GameState.crew = {
+    members = {},             -- Player's current crew (array of crew members)
+    morale = 5,               -- Overall crew morale (1-10)
+    
+    pool = {},                -- Global pool of all potential crew members
+    availableByLocation = {}  -- Mapping of locations to available crew member IDs
+}
+```
+
+## Functionality
+
+### Crew Distribution and Recruitment
+
+1. **Initialization**: During game start, the system:
+   - Populates the global crew pool with predefined crew members
+   - Distributes crew members to different locations based on location-specific criteria
+
+2. **Availability**: Each location has a different set of available crew members:
+   - Port Royal: Balanced mix of all roles
+   - Nassau: Focus on Gunners and combat specialists
+   - Havana: Focus on Navigators and exploration specialists
+   - Crown Colony: Mix with a focus on higher quality crew
+
+3. **Recruitment**: When a player hires a crew member:
+   - Gold is deducted based on the crew member's cost
+   - The crew member is added to the player's roster
+   - The crew member is removed from the location's available pool
+
+### Role Effects
+
+Each crew role provides specific benefits to gameplay:
+
+1. **Navigator**: Reduces travel time between zones by 0.5 weeks
+   - Implementation: When calculating travel time, checks if a Navigator is present in the crew
+   - The reduction is applied after wind effects
+   - Multiple Navigators currently don't stack (planned for future implementation)
+
+2. **Gunner**: (Currently visual only, to be implemented in future sprints)
+   - Will improve combat effectiveness in ship battles
+
+3. **Surgeon**: (Currently visual only, to be implemented in future sprints)
+   - Will provide healing and recovery benefits for crew
+
+## Implementation Details
+
+### Adding a New Crew Member to Pool
+
+To add a new crew member to the global pool:
+
+```lua
+table.insert(GameState.crew.pool, {
+    id = "unique_id",
+    name = "Crew Name",
+    role = "Role",
+    skill = skillValue,
+    loyalty = loyaltyValue,
+    health = healthValue,
+    cost = goldCost
+})
+```
+
+### Crew Distribution Logic
+
+Crew are distributed based on role patterns for each location:
+
+```lua
+-- Example distribution pattern
+-- Port Royal: 1 of each role (Navigator, Gunner, Surgeon)
+table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Navigator"))
+table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Gunner"))
+table.insert(self.crew.availableByLocation["Port Royal"], getCrewByRole("Surgeon"))
+```
+
+### Hiring Implementation
+
+The full hiring process:
+
+1. Check if the player can afford the crew member
+2. Check if there is space in the crew roster (based on ship capacity)
+3. Deduct gold from player resources
+4. Add crew member to player's roster
+5. Remove crew member from location availability
+6. Update the tavern interface to reflect changes
+
+### Accessing Crew Role Effects
+
+To check if a player has a crew member with a specific role:
+
+```lua
+local hasRole = false
+for _, crewMember in ipairs(gameState.crew.members) do
+    if crewMember.role == "RoleName" then
+        hasRole = true
+        break
+    end
+end
+```
+
+## Extension Points
+
+The crew system is designed for future extension in several ways:
+
+1. **Rotation and Refresh**: Implementing periodic crew rotation at ports
+2. **Character Progression**: Adding experience and leveling for crew members
+3. **Role Stacking**: Implementing cumulative effects for multiple crew with the same role
+4. **Advanced Effects**: Adding more complex role effects and combinations
+5. **Events and Interactions**: Creating crew-specific events and storylines
 
 ## docs/GameState.md
 # GameState Module Documentation
@@ -5158,4 +7986,188 @@ names; otherwise, rely on the existing center calculation.
 Scope for Sprint 1: Prioritize integrating the background map and one ship 
 sprite (e.g., Sloop). Add support for multiple ship classes if time 
 permits.
+
+## Tickets/2-1-design-and-implement-port-royal-hub.md
+Description:
+
+Create the main interface for Port Royal, serving as the central hub for 
+port-based activities. This screen allows players to access locations 
+(tavern, shipyard) and management screens (crew, inventory), with a clear 
+entry/exit point to the global map.
+
+Tasks:
+
+Design a main Port Royal screen with buttons: "Tavern," "Shipyard," 
+"Crew," "Inventory," and "Set Sail."
+Implement navigation logic: clicking a button opens the corresponding 
+screen (e.g., tavern or shipyard).
+Display the player’s current gold from GameState.resources.gold on the 
+main screen.
+Create placeholder side-view pixel art screens for the tavern and shipyard 
+(to be refined later).
+Ensure the "Set Sail" button returns the player to the global map by 
+updating GameState.ship.isMoving and triggering the map view.
+Acceptance Criteria:
+
+The main Port Royal screen displays current gold (e.g., "Gold: 50").
+Buttons for "Tavern," "Shipyard," "Crew," "Inventory," and "Set Sail" are 
+present and functional.
+Clicking "Tavern" or "Shipyard" opens a placeholder screen with basic 
+pixel art.
+Clicking "Set Sail" exits Port Royal and returns to the global map view.
+The hub is accessible only when the ship is in the Port Royal zone (check 
+GameState.ship.currentZone).
+Notes:
+
+Use side-view pixel art consistent with the retro style (e.g., 800x600 
+resolution).
+For now, focus on structure; detailed art and animations (e.g., flickering 
+lanterns) can be added in Sprint 10.
+Integrate with map.lua to detect when the ship is in Port Royal for hub 
+access.
+
+## Tickets/2-2-implement-tavern-with-crew-recruitment.md
+Description:
+
+Develop the tavern location within Port Royal, where players can recruit 
+crew members with basic roles (e.g., Navigator, Gunner, Surgeon), costing 
+gold and respecting crew capacity.
+
+Tasks:
+
+Design side-view pixel art for the tavern interior (placeholder for now).
+Create a recruitment interface displaying at least three available crew 
+members, each with:
+Name (e.g., "Jim Hawkins")
+Role (e.g., "Navigator")
+Hiring cost (e.g., 10 gold)
+Implement a "Hire" button that:
+Checks if GameState.resources.gold >= cost using GameState:canAfford.
+Checks if #GameState.crew.members < GameState.ship.crewCapacity.
+Deducts gold via GameState:spendResources and adds the crew member to 
+GameState.crew.members if conditions are met.
+Display error messages (e.g., "Not enough gold" or "Crew is full") if 
+hiring fails.
+Add a button to return to the main Port Royal screen.
+Acceptance Criteria:
+
+The tavern screen displays with basic pixel art.
+At least three crew members with different roles are available to hire.
+Hiring deducts gold and adds the crew member if capacity allows (e.g., max 
+4 for Sloop).
+Error messages appear when gold or crew space is insufficient.
+Players can return to the main Port Royal screen.
+Notes:
+
+Assume a fixed crew capacity of 4 for the starting Sloop 
+(GameState.ship.class = "sloop").
+Crew stats can be placeholders (e.g., skill = 1, loyalty = 5, health = 
+10); expand in later sprints.
+Store crew data in GameState.crew.members as per the existing structure.
+
+## Tickets/2-3-implement-shipyard-placeholder.md
+Description:
+
+Create a placeholder shipyard location in Port Royal to set the stage for 
+future repair and upgrade functionality.
+
+Tasks:
+
+Design basic side-view pixel art for the shipyard.
+Add a "Repair Ship" button that displays a message (e.g., "Repairs not yet 
+available").
+Include a button to return to the main Port Royal screen.
+Acceptance Criteria:
+
+The shipyard screen displays with basic pixel art.
+A "Repair Ship" button is present and shows a placeholder message when 
+clicked.
+Players can return to the main Port Royal screen.
+Notes:
+
+This is a placeholder; full functionality (repairs, upgrades) will come in 
+Sprint 7.
+Keep the art simple but consistent with the retro style.
+
+## Tickets/2-4-develop-crew-management-ui.md
+Description:
+
+Create a user interface to display the player’s current crew members and 
+their basic stats, accessible from the Port Royal hub.
+
+Tasks:
+
+Design a UI screen listing all crew members from GameState.crew.members.
+Display each crew member’s:
+Name
+Role (e.g., "Navigator")
+Skill level (e.g., 1)
+Loyalty (e.g., 5)
+Show the current crew count and capacity (e.g., "Crew: 2/4").
+Add a button to return to the main Port Royal screen.
+Acceptance Criteria:
+
+The crew management screen lists all crew members with their roles and 
+stats.
+The screen displays the current crew count and capacity.
+Players can close the screen and return to the main Port Royal hub.
+
+## Tickets/2-5-implement-basic-inventory-system.md
+Description:
+
+Develop an inventory screen to display the player’s resources, setting up 
+a 10-slot structure for future item management.
+
+Tasks:
+
+Add an inventory table to GameState with 10 slots: GameState.inventory = { 
+slots = {} }.
+Create an inventory screen showing:
+10 empty slots (for future cargo/items).
+A separate section displaying current resources from GameState.resources 
+(e.g., "Gold: 50, Rum: 0").
+Add a button to return to the main Port Royal screen.
+(Optional) Include debug functionality to add resources (e.g., 10 rum) for 
+testing.
+Acceptance Criteria:
+
+The inventory screen shows 10 empty slots and lists current resources.
+Players can close the screen and return to the main Port Royal hub.
+Notes:
+
+Slots will hold cargo or unique items in future sprints (e.g., Sprint 4 
+for trading).
+For now, display GameState.resources separately; slots remain empty until 
+trading is implemented.
+Keep the UI clean and legible within the retro style.
+
+## Tickets/2-6-implement-navigator-crew-role-effect.md
+Description:
+
+Add the Navigator crew role’s effect to reduce travel time between zones, 
+integrating port decisions with sea gameplay.
+
+Tasks:
+
+Modify GameState:calculateTravelTime to check for a Navigator in 
+GameState.crew.members (e.g., role == "Navigator").
+If a Navigator is present, reduce travel time by 0.5 weeks (e.g., base 1 
+week becomes 0.5 weeks), with a minimum of 0.5 weeks.
+Update the zone tooltip in map.lua to reflect the reduced travel time when 
+a Navigator is active (e.g., "Travel time: 0.5 weeks").
+Acceptance Criteria:
+
+Travel time between zones is reduced by 0.5 weeks with a Navigator in the 
+crew.
+The reduced time is shown in the zone tooltip (e.g., "0.5 weeks" instead 
+of "1 week").
+Travel time never drops below 0.5 weeks.
+Notes:
+
+Assume only one Navigator applies the effect; handle multiple Navigators 
+in future sprints.
+Test with the existing wind mechanics (e.g., Navigator + "with wind" = 0.5 
+weeks minimum).
+Update GameState:advanceTime calls in ship.lua to reflect the new travel 
+time.
 

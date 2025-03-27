@@ -5,6 +5,7 @@ local gameMap = require('map')
 local playerShip = require('ship')
 local timeSystem = require('time')
 local portRoyal = require('portRoyal')
+local combatSystem = require('combat')
 
 function love.load()
     -- Load game assets and initialize states
@@ -21,6 +22,7 @@ function love.load()
     gameMap:load(gameState)     -- Initialize map 
     playerShip:load(gameState, gameMap)  -- Initialize ship
     portRoyal:load(gameState)   -- Initialize Port Royal interface
+    combatSystem:load(gameState)  -- Initialize combat system
     
     -- Set window properties
     love.window.setTitle("Pirate's Wager: Blood for Gold")
@@ -34,8 +36,11 @@ function love.update(dt)
     -- Early return if game is paused
     if gameState.settings.isPaused then return end
     
-    -- Update game state
-    if gameState.settings.portMode then
+    -- Update game state based on current mode
+    if gameState.settings.combatMode then
+        -- Update naval combat
+        combatSystem:update(dt, gameState)
+    elseif gameState.settings.portMode then
         -- Update port interface
         portRoyal:update(dt, gameState)
     else
@@ -54,12 +59,16 @@ function love.update(dt)
         gameMap:load(gameState)
         playerShip:load(gameState, gameMap)
         portRoyal:load(gameState)
+        combatSystem:load(gameState)
     end
 end
 
 function love.draw()
     -- Render game based on current mode
-    if gameState.settings.portMode then
+    if gameState.settings.combatMode then
+        -- Draw naval combat
+        combatSystem:draw(gameState)
+    elseif gameState.settings.portMode then
         -- Draw port interface
         portRoyal:draw(gameState)
     else
@@ -79,7 +88,9 @@ function love.draw()
 end
 
 function love.mousemoved(x, y)
-    if gameState.settings.portMode then
+    if gameState.settings.combatMode then
+        combatSystem:mousemoved(x, y, gameState)
+    elseif gameState.settings.portMode then
         portRoyal:mousemoved(x, y, gameState)
     else
         gameMap:mousemoved(x, y, gameState)
@@ -89,7 +100,9 @@ end
 function love.mousepressed(x, y, button)
     if gameState.time.isGameOver then return end
     
-    if gameState.settings.portMode then
+    if gameState.settings.combatMode then
+        combatSystem:mousepressed(x, y, button, gameState)
+    elseif gameState.settings.portMode then
         portRoyal:mousepressed(x, y, button, gameState)
     else
         gameMap:mousepressed(x, y, button, gameState)
@@ -98,8 +111,11 @@ end
 
 function love.keypressed(key)
     if key == "escape" then
+        -- If in combat mode, end the battle
+        if gameState.settings.combatMode then
+            combatSystem:endBattle(gameState)
         -- If in port mode, return to map
-        if gameState.settings.portMode then
+        elseif gameState.settings.portMode then
             gameState.settings.portMode = false
             gameState.settings.currentPortScreen = "main"
         else
@@ -109,5 +125,8 @@ function love.keypressed(key)
         gameState.settings.debug = not gameState.settings.debug
     elseif key == "p" then
         gameState.settings.isPaused = not gameState.settings.isPaused
+    elseif key == "c" and not gameState.settings.combatMode then
+        -- Debug key to start a test battle
+        combatSystem:startBattle(gameState, "sloop")
     end
 end

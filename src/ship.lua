@@ -170,6 +170,11 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
             -- We no longer automatically enter Port Royal
             -- This will be handled by the mooring system instead
             
+            -- Check if we should trigger a random encounter (20% chance)
+            if targetZone.name ~= "Port Royal" and math.random() < 0.2 then
+                self:initiateEncounter(gameState)
+            end
+            
             return true
         else
             print("Cannot move to " .. targetZone.name .. " - not adjacent to current zone")
@@ -179,6 +184,38 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
         print("Ship is already in motion")
         return false
     end
+end
+
+-- Initiate an encounter with an enemy ship
+function Ship:initiateEncounter(gameState)
+    -- In a complete implementation, this would have different encounter types
+    -- and could include narrative events, but for now, we'll focus on combat
+    
+    -- Check if combat system is loaded
+    local combatSystem = require('combat')
+    if not combatSystem then
+        print("Error: Combat system not loaded")
+        return false
+    end
+    
+    -- Determine what type of ship the player encounters
+    local encounterRoll = math.random()
+    local enemyShipClass
+    
+    -- Higher level zones would affect encounter difficulty, but for now:
+    if encounterRoll < 0.6 then
+        enemyShipClass = "sloop"      -- 60% chance of encountering a sloop
+    elseif encounterRoll < 0.9 then
+        enemyShipClass = "brigantine" -- 30% chance of encountering a brigantine
+    else
+        enemyShipClass = "galleon"    -- 10% chance of encountering a galleon
+    end
+    
+    -- Start naval combat
+    print("Encountered an enemy " .. enemyShipClass .. "! Prepare for battle!")
+    combatSystem:startBattle(gameState, enemyShipClass)
+    
+    return true
 end
 
 return Ship
