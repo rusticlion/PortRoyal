@@ -117,7 +117,7 @@ The combat system includes three core actions:
 
 The combat system uses a dice pool mechanic based on Forged in the Dark:
 
-- Actions roll a number of six-sided dice (d6) based on ship stats and crew
+- Actions roll a number of six-sided dice (d6) based on ship stats, crew, and modifiers
 - Results are categorized:
   - 6: Full success
   - 4-5: Partial success
@@ -133,16 +133,42 @@ The combat system uses a dice pool mechanic based on Forged in the Dark:
   - Partial Success: Minimal effect (e.g., 1 damage, 5 HP repair)
   - Failure: No effect
 
+### Modifiers
+
+The system supports modifiers that add or remove dice from action rolls:
+
+- Positive modifiers add dice to the roll (e.g., "+1 die from Point Blank Range")
+- Negative modifiers remove dice (e.g., "-2 dice from Target Evading")
+- If the total dice count is reduced to 0 or negative, you roll 2 dice and take the worst (lowest) result
+- Modifiers can be temporary (one-time use) or persistent (lasting until cleared)
+
+### Action Types with Modifiers
+
+1. **Fire Cannons**:
+   - Base dice from ship's firepower attribute
+   - +1 die for Point Blank Range (adjacent hex)
+   - Negative dice equal to target's evade score
+
+2. **Evade**:
+   - Base dice from ship's class (sloop=3, brigantine=2, galleon=1)
+   - Result sets ship's evade score until next turn
+   - Evade score reduces attacker's dice when ship is targeted
+
+3. **Repair**:
+   - Base 1 die
+   - Surgeon crew member adds dice equal to their skill level
+
 ## Game Flow
 
 1. **Combat Initialization**:
    - Player and enemy ships are placed on the grid
    - Ships are given initial stats based on their class
+   - Crew points are allocated based on crew size for the player and ship class for enemies
 
 2. **Turn Structure**:
    - Each turn consists of a movement phase and an action phase
-   - Players can move their ship during the movement phase
-   - Players can perform one action during the action phase
+   - During movement phase, players can move their ship based on speed
+   - During action phase, players can perform multiple actions based on crew points
 
 3. **Movement Phase**:
    - Player selects their ship and can move to valid hexes
@@ -150,13 +176,34 @@ The combat system uses a dice pool mechanic based on Forged in the Dark:
    - Cannot move through occupied hexes
 
 4. **Action Phase**:
-   - Player selects one action (Fire, Evade, Repair)
+   - Player spends crew points to perform actions
+   - Actions have different costs:
+     - Fire Cannons: 1 CP
+     - Evade: 1 CP
+     - Repair: 2 CP
+   - Multiple actions can be performed as long as crew points are available
    - Action results are calculated using dice rolls
    - Enemy AI takes its turn after the player
 
-5. **Combat Resolution**:
+5. **End of Turn**:
+   - Crew points are replenished for the next turn
+   - Movement points are reset
+
+6. **Combat Resolution**:
    - Combat ends when one ship is destroyed (0 durability)
    - Player can also retreat from battle
+
+## Crew Point System
+
+The crew point system connects ship crew size to combat actions:
+
+- Each ship has a maximum number of crew points equal to its crew size
+- The player's ship CP is based on the number of crew members
+- Enemy ships' CP is based on their class (sloop=2, brigantine=4, galleon=6)
+- Crew points are spent to perform actions during the action phase
+- This creates an action economy where players must decide which actions are most important
+- Larger ships with more crew can perform more actions each turn
+- Creates a strategic layer where ship size and crew complement affect combat capability
 
 ## Future Enhancements
 

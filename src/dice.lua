@@ -34,19 +34,88 @@ function Dice:init()
     end
 end
 
--- Roll dice
-function Dice:roll(numDice)
+-- Modifier class for dice rolls
+local Modifier = {
+    description = "",  -- Description of the modifier
+    value = 0,         -- The dice modifier value (positive or negative)
+    temporary = false  -- Whether modifier is temporary (removed after roll)
+}
+
+-- Create a new modifier
+function Modifier:new(description, value, temporary)
+    local mod = {
+        description = description or "",
+        value = value or 0,
+        temporary = temporary or false
+    }
+    setmetatable(mod, self)
+    self.__index = self
+    return mod
+end
+
+-- Roll dice with modifiers
+function Dice:roll(baseDice, modifiers)
+    local modifiers = modifiers or {}
     local results = {}
+    local rollInfo = {
+        baseDice = baseDice,
+        modifiers = {},       -- Copy of applied modifiers
+        totalDiceCount = 0,   -- Final dice count after modifiers
+        zeroOrNegative = false, -- Flag if we had 0 or negative dice
+        results = {},         -- The actual dice values rolled
+        rolls = {}            -- All roll operations (for debugging)
+    }
     
-    -- Roll the specified number of dice (1-5)
-    numDice = math.min(5, math.max(1, numDice))
+    -- Calculate total dice count from modifiers
+    local totalDice = baseDice
+    local modReport = {}
     
-    for i = 1, numDice do
-        -- Each die is a d6 (1-6)
-        table.insert(results, math.random(1, 6))
+    -- Apply all modifiers
+    for _, mod in ipairs(modifiers) do
+        totalDice = totalDice + mod.value
+        table.insert(modReport, {
+            description = mod.description, 
+            value = mod.value
+        })
+        table.insert(rollInfo.rolls, "Applied " .. mod.description .. ": " .. (mod.value >= 0 and "+" or "") .. mod.value .. " dice")
     end
     
-    return results
+    -- Store the full list of applied modifiers
+    rollInfo.modifiers = modReport
+    
+    -- Handle zero or negative dice count (roll 2 dice and take worst)
+    if totalDice <= 0 then
+        rollInfo.zeroOrNegative = true
+        rollInfo.totalDiceCount = 2
+        table.insert(rollInfo.rolls, "Reduced to " .. totalDice .. " dice - rolling 2 and taking worst")
+        
+        -- Roll 2 dice
+        for i = 1, 2 do
+            local dieValue = math.random(1, 6)
+            table.insert(results, dieValue)
+            table.insert(rollInfo.rolls, "Rolled " .. dieValue)
+        end
+        
+        -- Take the worst (lowest) value
+        table.sort(results)
+        rollInfo.results = {results[1]}  -- Keep only the lowest value
+        table.insert(rollInfo.rolls, "Taking worst value: " .. results[1])
+    else
+        -- Normal dice pool - roll adjusted number of dice (max 5)
+        totalDice = math.min(5, totalDice)
+        rollInfo.totalDiceCount = totalDice
+        
+        for i = 1, totalDice do
+            local dieValue = math.random(1, 6)
+            table.insert(results, dieValue)
+            table.insert(rollInfo.rolls, "Rolled " .. dieValue)
+        end
+        
+        rollInfo.results = results
+    end
+    
+    -- Return both the roll results and the detailed roll info
+    return results, rollInfo
 end
 
 -- Interpret dice results according to Forged in the Dark rules
@@ -181,4 +250,39 @@ function Dice:getResultColor(outcome)
     end
 end
 
-return Dice
+-- Create a helper function to easily create modifiers
+function Dice:createModifier(description, value, temporary)
+    return Modifier:new(description, value, temporary)
+end
+
+-- Draw modifiers list
+function Dice:drawModifiers(modifiers, x, y, scale)
+    love.graphics.setColor(1, 1, 1, 1)
+    local yPos = y
+    local scale = scale or 1
+    local lineHeight = 20 * scale
+    
+    for i, mod in ipairs(modifiers) do
+        -- Choose color based on modifier value
+        if mod.value > 0 then
+            love.graphics.setColor(0.2, 0.8, 0.2, 1) -- Green for positive
+        else
+            love.graphics.setColor(0.8, 0.2, 0.2, 1) -- Red for negative
+        end
+        
+        local sign = mod.value > 0 and "+" or ""
+        love.graphics.print(mod.description .. ": " .. sign .. mod.value .. " dice", x, yPos)
+        yPos = yPos + lineHeight
+    end
+    
+    -- Reset color
+    love.graphics.setColor(1, 1, 1, 1)
+    
+    return yPos - y  -- Return total height used
+end
+
+-- Export the module and the Modifier class
+return {
+    dice = Dice,
+    Modifier = Modifier
+}

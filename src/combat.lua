@@ -2,7 +2,9 @@
 -- Implements a hex grid battlefield and ship combat mechanics
 
 -- Import dice system
-local diceSystem = require('dice')
+local diceModule = require('dice')
+local diceSystem = diceModule.dice
+local Modifier = diceModule.Modifier
 
 local Combat = {
     -- Constants for the hex grid
@@ -43,6 +45,13 @@ local Combat = {
         phase = "movement", -- Current phase (movement, attack, etc.)
     }
     --]]
+    
+    -- Action costs in crew points
+    actionCosts = {
+        fire = 1,      -- Fire Cannons costs 1 crew point
+        evade = 1,     -- Evade costs 1 crew point
+        repair = 2     -- Repair costs 2 crew points (more labor intensive)
+    },
     
     -- Ship definitions for the hex grid (size, shape, movement patterns)
     shipDefinitions = {
@@ -101,8 +110,11 @@ function Combat:initBattle(gameState, enemyShipClass)
             position = {2, 8}, -- Bottom-left area
             orientation = 0,   -- North-facing to start
             movesRemaining = playerShipSpeed,
-            evading = 0,       -- Evasion success level
-            hasActed = false   -- Whether ship has performed an action this turn
+            evadeScore = 0,    -- Evade score (reduces attacker's dice)
+            hasActed = false,  -- Whether ship has performed an action this turn
+            modifiers = {},    -- Active modifiers
+            crewPoints = gameState.crew.members and #gameState.crew.members or 1, -- Available crew points for actions
+            maxCrewPoints = gameState.crew.members and #gameState.crew.members or 1  -- Maximum crew points per turn
         },
         enemyShip = {
             class = enemyShipClass or "sloop", -- Default to sloop if not specified
@@ -112,8 +124,11 @@ function Combat:initBattle(gameState, enemyShipClass)
             movesRemaining = self.shipDefinitions[enemyShipClass or "sloop"].speed,
             durability = enemyShipClass == "galleon" and 40 or 
                         enemyShipClass == "brigantine" and 20 or 10, -- Set HP based on ship class
-            evading = 0,       -- Evasion success level
-            hasActed = false   -- Whether ship has performed an action this turn
+            evadeScore = 0,    -- Evade score (reduces attacker's dice)
+            hasActed = false,  -- Whether ship has performed an action this turn
+            modifiers = {},    -- Active modifiers
+            crewPoints = enemyShipClass == "galleon" and 6 or enemyShipClass == "brigantine" and 4 or 2, -- Based on ship class
+            maxCrewPoints = enemyShipClass == "galleon" and 6 or enemyShipClass == "brigantine" and 4 or 2
         },
         turn = "player",
         phase = "movement",
@@ -545,14 +560,15 @@ function Combat:drawUI(gameState)
     love.graphics.print("HP: " .. gameState.ship.durability .. "/" .. 
                       (playerShip.class == "sloop" and 10 or 
                        playerShip.class == "brigantine" and 20 or 40), 600, 40)
-    
     if battle.phase == "movement" then
         love.graphics.print("Moves: " .. playerShip.movesRemaining .. "/" .. 
                          self.shipDefinitions[playerShip.class].speed, 600, 60)
+    else
+        love.graphics.print("Crew Points: " .. playerShip.crewPoints .. "/" .. playerShip.maxCrewPoints, 600, 60)
     end
     
-    if playerShip.evading > 0 then
-        love.graphics.print("Evading: " .. playerShip.evading, 600, 80)
+    if playerShip.evadeScore > 0 then
+        love.graphics.print("Evade Score: " .. playerShip.evadeScore, 600, 80)
     end
     
     -- Draw enemy ship info
@@ -563,8 +579,8 @@ function Combat:drawUI(gameState)
                       (enemyShip.class == "sloop" and 10 or 
                        enemyShip.class == "brigantine" and 20 or 40), 600, 140)
     
-    if enemyShip.evading > 0 then
-        love.graphics.print("Evading: " .. enemyShip.evading, 600, 160)
+    if enemyShip.evadeScore > 0 then
+        love.graphics.print("Evade Score: " .. enemyShip.evadeScore, 600, 160)
     end
     
     -- Draw action buttons if it's player's turn and in action phase
@@ -573,19 +589,19 @@ function Combat:drawUI(gameState)
         love.graphics.setColor(0.8, 0.3, 0.3, 0.8)
         love.graphics.rectangle("fill", 50, 500, 160, 40)
         love.graphics.setColor(1, 1, 1, 1)
-        love.graphics.print("Fire Cannons", 80, 510)
+        love.graphics.print("Fire Cannons (" .. self.actionCosts.fire .. " CP)", 65, 510)
         
         -- Evade button
         love.graphics.setColor(0.3, 0.3, 0.8, 0.8)
         love.graphics.rectangle("fill", 250, 500, 160, 40)
         love.graphics.setColor(1, 1, 1, 1)
-        love.graphics.print("Evade", 300, 510)
+        love.graphics.print("Evade (" .. self.actionCosts.evade .. " CP)", 280, 510)
         
         -- Repair button
         love.graphics.setColor(0.3, 0.8, 0.3, 0.8)
         love.graphics.rectangle("fill", 450, 500, 160, 40)
         love.graphics.setColor(1, 1, 1, 1)
-        love.graphics.print("Repair", 500, 510)
+        love.graphics.print("Repair (" .. self.actionCosts.repair .. " CP)", 465, 510)
         
         -- End Turn button
         love.graphics.setColor(0.7, 0.7, 0.7, 0.8)
@@ -615,19 +631,32 @@ function Combat:drawUI(gameState)
         -- Action title
         love.graphics.setColor(1, 1, 0, 1)
         local title
-        if battle.actionResult.action == "fire" then
-            title = (battle.actionResult.attacker == "player" and "You fired cannons" or "Enemy fired cannons")
-            title = title .. " - Damage: " .. battle.actionResult.damage
-        elseif battle.actionResult.action == "evade" then
-            title = (battle.actionResult.ship == "player" and "You evaded" or "Enemy evaded")
-            title = title .. " - Evasion: " .. battle.actionResult.evasion
-        elseif battle.actionResult.action == "repair" then
-            title = (battle.actionResult.ship == "player" and "You repaired" or "Enemy repaired")
-            title = title .. " - HP Restored: " .. battle.actionResult.repairAmount
+        -- Check if action was successful or failed due to lack of crew points
+        if battle.actionResult.success == false then
+            -- Failed action due to insufficient crew points
+            title = battle.actionResult.message
+            love.graphics.setColor(1, 0.3, 0.3, 1)  -- Red for error message
+        else
+            -- Successful action
+            if battle.actionResult.action == "fire" then
+                title = (battle.actionResult.attacker == "player" and "You fired cannons" or "Enemy fired cannons")
+                title = title .. " - Damage: " .. battle.actionResult.damage
+            elseif battle.actionResult.action == "evade" then
+                title = (battle.actionResult.ship == "player" and "You evaded" or "Enemy evaded")
+                title = title .. " - Evade Score: " .. battle.actionResult.evadeScore
+            elseif battle.actionResult.action == "repair" then
+                title = (battle.actionResult.ship == "player" and "You repaired" or "Enemy repaired")
+                title = title .. " - HP Restored: " .. battle.actionResult.repairAmount
+            end
         end
         
         -- Display title
         love.graphics.print(title, 70, 410)
+        
+        -- Skip dice display for failed actions
+        if battle.actionResult.success == false then
+            return
+        end
         
         -- Display dice rolled with visuals
         love.graphics.setColor(1, 1, 1, 1)
@@ -639,6 +668,13 @@ function Combat:drawUI(gameState)
         love.graphics.setColor(diceSystem:getResultColor(battle.actionResult.outcome))
         local resultText = diceSystem:getResultText(battle.actionResult.outcome)
         love.graphics.print(resultText, 250, 445)
+        
+        -- If we have modifiers, display them
+        if battle.actionResult.modifiers and #battle.actionResult.modifiers > 0 then
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.print("Modifiers:", 400, 445)
+            diceSystem:drawModifiers(battle.actionResult.modifiers, 400, 470, 0.8)
+        end
         
         -- Display detailed counts underneath in white
         love.graphics.setColor(1, 1, 1, 1)
@@ -771,6 +807,7 @@ function Combat:endPlayerTurn(gameState)
     -- Reset player ship for next turn
     battle.playerShip.hasActed = false
     battle.playerShip.movesRemaining = self.shipDefinitions[battle.playerShip.class].speed
+    battle.playerShip.crewPoints = battle.playerShip.maxCrewPoints
     
     -- Switch to enemy turn
     battle.turn = "enemy"
@@ -798,6 +835,7 @@ function Combat:processEnemyTurn(gameState)
     -- End enemy turn, back to player
     battle.enemyShip.hasActed = false
     battle.enemyShip.movesRemaining = self.shipDefinitions[battle.enemyShip.class].speed
+    battle.enemyShip.crewPoints = battle.enemyShip.maxCrewPoints
     
     -- Increment turn counter
     battle.turnCount = battle.turnCount + 1
@@ -917,27 +955,66 @@ function Combat:fireCannons(gameState, target)
     local attacker = battle.turn == "player" and battle.playerShip or battle.enemyShip
     local defender = battle.turn == "player" and battle.enemyShip or battle.playerShip
     
-    -- Calculate number of dice based on firepower (cannons)
-    local numDice
+    -- Check if enough crew points are available
+    if attacker.crewPoints < self.actionCosts.fire then
+        return {
+            action = "fire",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.fire .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    attacker.crewPoints = attacker.crewPoints - self.actionCosts.fire
+    
+    -- Calculate base dice based on firepower (cannons)
+    local baseDice
     if battle.turn == "player" then
         -- Player uses their ship's firepower from gameState
-        numDice = gameState.ship.firepower
+        baseDice = gameState.ship.firepower
     else
         -- Enemy uses firepower based on ship class
-        if defender.class == "sloop" then
-            numDice = 2  -- Sloop has 2 cannons
-        elseif defender.class == "brigantine" then
-            numDice = 6  -- Brigantine has 6 cannons
-        elseif defender.class == "galleon" then
-            numDice = 12  -- Galleon has 12 cannons
+        if attacker.class == "sloop" then
+            baseDice = 2  -- Sloop has 2 cannons
+        elseif attacker.class == "brigantine" then
+            baseDice = 6  -- Brigantine has 6 cannons
+        elseif attacker.class == "galleon" then
+            baseDice = 12  -- Galleon has 12 cannons
         else
-            numDice = 2  -- Default
+            baseDice = 2  -- Default
         end
     end
     
-    -- Roll dice for attack
-    local diceResults = self:rollDice(numDice)
-    local outcome = self:interpretDiceResults(diceResults)
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Check for point blank range (adjacent hex)
+    local aq, ar = attacker.position[1], attacker.position[2]
+    local dq, dr = defender.position[1], defender.position[2]
+    local dist = self:hexDistance(aq, ar, dq, dr)
+    
+    if dist == 1 then
+        -- Point blank range gives +1 die
+        table.insert(modifiers, diceSystem:createModifier("Point Blank Range", 1, true))
+    end
+    
+    -- Apply defender's evade score as a negative modifier
+    if defender.evadeScore > 0 then
+        table.insert(modifiers, diceSystem:createModifier("Target Evading", -defender.evadeScore, true))
+        -- Reset defender's evade score after this attack
+        defender.evadeScore = 0
+    end
+    
+    -- Add any persistent modifiers from attacker
+    for _, mod in ipairs(attacker.modifiers) do
+        if mod.category == "attack" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for attack with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
     
     -- Calculate damage based on outcome level
     local damage = 0
@@ -972,15 +1049,34 @@ function Combat:fireCannons(gameState, target)
         end
     end
     
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(attacker)
+    
     -- Return result for UI display
     return {
         action = "fire",
         dice = diceResults,
         outcome = outcome,
+        rollInfo = rollInfo,
         damage = damage,
         attacker = battle.turn,
-        targetDurability = battle.turn == "player" and battle.enemyShip.durability or gameState.ship.durability
+        targetDurability = battle.turn == "player" and battle.enemyShip.durability or gameState.ship.durability,
+        modifiers = modifiers
     }
+end
+
+-- Clean up temporary modifiers
+function Combat:cleanupTemporaryModifiers(ship)
+    -- Filter out temporary modifiers
+    local persistentModifiers = {}
+    for _, mod in ipairs(ship.modifiers) do
+        if not mod.temporary then
+            table.insert(persistentModifiers, mod)
+        end
+    end
+    
+    -- Replace with only persistent modifiers
+    ship.modifiers = persistentModifiers
 end
 
 -- Evade action (Ticket 3-2)
@@ -988,38 +1084,65 @@ function Combat:evade(gameState)
     local battle = gameState.combat
     local ship = battle.turn == "player" and battle.playerShip or battle.enemyShip
     
-    -- Calculate number of dice based on ship class (speed influences evasion)
-    local numDice
-    if ship.class == "sloop" then
-        numDice = 3  -- Sloops are very maneuverable (3 dice)
-    elseif ship.class == "brigantine" then
-        numDice = 2  -- Brigantines are moderately maneuverable (2 dice)
-    else
-        numDice = 1  -- Galleons are slow (1 die)
+    -- Check if enough crew points are available
+    if ship.crewPoints < self.actionCosts.evade then
+        return {
+            action = "evade",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.evade .. ")"
+        }
     end
     
-    -- Roll dice for evasion
-    local diceResults = self:rollDice(numDice)
-    local outcome = self:interpretDiceResults(diceResults)
+    -- Deduct crew points
+    ship.crewPoints = ship.crewPoints - self.actionCosts.evade
     
-    -- Set evasion status based on outcome level
-    local evasionLevel = outcome.level  -- 0=failure, 1=partial, 2=success, 3=critical
+    -- Calculate base dice based on ship class (speed influences evasion)
+    local baseDice
+    if ship.class == "sloop" then
+        baseDice = 3  -- Sloops are very maneuverable (3 dice)
+    elseif ship.class == "brigantine" then
+        baseDice = 2  -- Brigantines are moderately maneuverable (2 dice)
+    else
+        baseDice = 1  -- Galleons are slow (1 die)
+    end
+    
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Add any persistent modifiers from ship
+    for _, mod in ipairs(ship.modifiers) do
+        if mod.category == "evade" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for evasion with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
+    
+    -- Set evade score based on outcome level
+    local evadeScore = outcome.level  -- 0=failure, 1=partial, 2=success, 3=critical
     
     if battle.turn == "player" then
         -- Player evades
-        battle.playerShip.evading = evasionLevel
+        battle.playerShip.evadeScore = evadeScore
     else
         -- Enemy evades
-        battle.enemyShip.evading = evasionLevel
+        battle.enemyShip.evadeScore = evadeScore
     end
+    
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(ship)
     
     -- Return result for UI display
     return {
         action = "evade",
         dice = diceResults,
         outcome = outcome,
-        evasion = evasionLevel,
-        ship = battle.turn
+        rollInfo = rollInfo,
+        evadeScore = evadeScore,
+        ship = battle.turn,
+        modifiers = modifiers
     }
 end
 
@@ -1028,23 +1151,46 @@ function Combat:repair(gameState)
     local battle = gameState.combat
     local ship = battle.turn == "player" and battle.playerShip or battle.enemyShip
     
-    -- Calculate number of dice - always 1 for base repair
-    local numDice = 1
+    -- Check if enough crew points are available
+    if ship.crewPoints < self.actionCosts.repair then
+        return {
+            action = "repair",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.repair .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    ship.crewPoints = ship.crewPoints - self.actionCosts.repair
+    
+    -- Calculate base dice - always 1 for base repair
+    local baseDice = 1
+    
+    -- Gather modifiers
+    local modifiers = {}
     
     -- Check for surgeon in crew (adds dice)
     if battle.turn == "player" then
         -- Check player's crew for surgeon
         for _, member in ipairs(gameState.crew.members) do
             if member.role == "Surgeon" then
-                numDice = numDice + member.skill  -- Add surgeon's skill level
+                -- Add surgeon's skill level as a modifier
+                table.insert(modifiers, diceSystem:createModifier("Surgeon: " .. member.name, member.skill, true))
                 break
             end
         end
     end
     
-    -- Roll dice for repair
-    local diceResults = self:rollDice(numDice)
-    local outcome = self:interpretDiceResults(diceResults)
+    -- Add any persistent modifiers from ship
+    for _, mod in ipairs(ship.modifiers) do
+        if mod.category == "repair" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for repair with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
     
     -- Calculate repair amount based on outcome level
     local repairAmount = 0
@@ -1071,14 +1217,19 @@ function Combat:repair(gameState)
                                             maxDurability)
     end
     
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(ship)
+    
     -- Return result for UI display
     return {
         action = "repair",
         dice = diceResults,
         outcome = outcome,
+        rollInfo = rollInfo,
         repairAmount = repairAmount,
         ship = battle.turn,
-        currentDurability = battle.turn == "player" and gameState.ship.durability or battle.enemyShip.durability
+        currentDurability = battle.turn == "player" and gameState.ship.durability or battle.enemyShip.durability,
+        modifiers = modifiers
     }
 end
 
