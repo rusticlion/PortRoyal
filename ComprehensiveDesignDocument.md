@@ -93,10 +93,10 @@ Description: A versatile, mid-sized ship that balances speed and strength.
 Suitable for a wide range of pirate activities.
 Hex Size and Shape: 2 hexes in a straight line, sleek and narrow.
 Stats:
-Speed: 2 hexes per turn (3 with favorable wind)
-Firepower: 6 cannons (3 dice per attack)
+Speed: 2 hexes per turn (Movement Phase)
+Firepower Dice: 3 dice per 'Fire Cannons' action. (Aligned with Design Doc) (Actual cannons: 6)
 Durability: 20 HP
-Crew Capacity: 8 members
+Crew Capacity: 8 members (Max 8 CP per turn) (Added CP link)
 Tactical Role: A jack-of-all-trades ship, capable of raiding, boarding, or 
 engaging in sustained combat.
 Flavor: A weathered vessel with a history of battles, its deck adorned 
@@ -109,10 +109,10 @@ kite shape provides a broad profile for devastating broadsides.
 Hex Size and Shape: 4 hexes in a kite arrangement (1 hex bow, 2 hexes 
 midship, 1 hex stern), wide and imposing.
 Stats:
-Speed: 1 hex per turn (2 with favorable wind)
-Firepower: 12 cannons (6 dice per attack)
+Speed: 1 hex per turn (Movement Phase)
+Firepower Dice: 6 dice per 'Fire Cannons' action. (Aligned with Design Doc) (Actual cannons: 12)
 Durability: 40 HP
-Crew Capacity: 12 members
+Crew Capacity: 12 members (Max 12 CP per turn) (Added CP link)
 Tactical Role: A slow but powerful ship that excels in head-on combat and 
 intimidation. Requires careful positioning due to its size.
 Flavor: An ornate, battle-scarred behemoth, its deck laden with gold and 
@@ -136,7 +136,7 @@ Upgrades: Players can enhance speed, firepower, or durability within each
 class to suit their playstyle.
 5. Mechanics Deep Dive
 5.1 Crew System
-Crew Roles: Navigator, Gunner, Surgeon, etc., boosting specific actions.
+Crew Roles: Navigator, Gunner, Surgeon, etc., boosting specific actions (e.g., Navigator reduces travel time, Surgeon adds dice to Repair, Gunner adds dice to Fire Cannons). (Added Gunner effect intent)
 Character Sheet:
 Role: Defines specialty.
 Skill Level: 1-5, adding dice/bonuses to rolls.
@@ -146,7 +146,7 @@ Health: Hit points; injuries occur in combat.
 Boon/Bane: One positive trait (e.g., “Sharp-Eyed”) and one negative (e.g., 
 “Cursed”).
 Recruitment: Found in taverns or via quests; elite crew require high 
-reputation.
+reputation. Hiring costs gold. (Clarified hiring cost)
 5.2 Item System
 Types:
 Resources: Bulk goods (e.g., rum, timber) tracked numerically.
@@ -165,8 +165,8 @@ Impact: Affects opportunities, crew recruitment, and events.
 5.4 Passage of Time
 Timeline: 72 weeks, with the earthquake striking randomly between weeks 
 60-72.
-At Sea: Zone movement or major actions cost 1 week.
-In Port: Actions take 1-3 weeks (e.g., 1 for repairs, 2 for investments).
+At Sea: Zone movement costs time (base 1 week, modified by wind/crew). Major actions like specific exploration events might cost time. Combat itself does not advance the week counter, but initiating it might if tied to an action. (Clarified time costs)
+In Port: Actions take 1-3 weeks (e.g., 1 for basic repairs, 2 for investments, 1 for recruiting). (Confirmed port time costs)
 Hints: NPC rumors and tremors escalate as the quake approaches.
 5.5 Economic Systems
 Trade Routes: Buy low, sell high across ports with dynamic pricing.
@@ -183,9 +183,9 @@ Purpose: A streamlined hub for management and prep with flavorful
 immersion.
 7. Combat System
 Hex Grid: 10x10 hexes; ships sized 1-4 hexes based on class.
-Movement: Varies by ship class (see "Ship Classes").
-Actions: Two per turn (movement + combat/utility).
-Dice Pools: 1-5 d6s for attacks, evasion, etc.
+Turn Structure: Movement Phase (spend move points based on Speed) followed by Action Phase (spend Crew Points). (Aligned with Section 3.1)
+Actions: Core actions (Fire, Evade, Repair) cost CP (1/1/2 respectively). Others TBD. (Aligned with Section 3.1)
+Dice Pools: 1-5 d6s for attacks, evasion, etc., based on ship, crew (e.g., Gunner skill for Fire, Surgeon for Repair), and context. (Added crew skill links)
 Boarding Actions: Side-view crew combat.
 8. Modular Systems
 Ship Customization: Hulls, sails, cannons with unique stats (e.g., speed, 

@@ -1,11 +1,13 @@
 -- Caribbean Map Module
+local AssetUtils = require('utils.assetUtils')
 
 local Map = {
     zones = {},
     hoveredZone = nil,
     -- Base map dimensions
     width = 800,
-    height = 600
+    height = 600,
+    background = nil
 }
 
 -- Zone definitions
@@ -169,13 +171,10 @@ function Map:load(gameState)
         end
     end
     
-    -- Load background image if available
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/caribbean_map.png")
-    end)
+    -- Load background image using AssetUtils
+    self.background = AssetUtils.loadImage("assets/caribbean_map.png", "map")
     
-    if success then
-        self.background = result
+    if self.background then
         print("Map background loaded successfully")
     else
         print("Map background image not found. Background will be displayed as blue rectangle.")
@@ -207,7 +206,8 @@ function Map:draw(gameState)
         love.graphics.setColor(1, 1, 1, 1)  -- White, fully opaque
         love.graphics.draw(self.background, 0, 0)
     else
-        love.graphics.setColor(0.1, 0.3, 0.5, 1)  -- Deep blue ocean background
+        -- Use deep blue ocean as fallback background
+        love.graphics.setColor(0.1, 0.3, 0.5, 1)
         love.graphics.rectangle("fill", 0, 0, self.width, self.height)
     end
     

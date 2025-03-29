@@ -4,7 +4,7 @@ function love.conf(t)
     t.version = "11.4"                -- The LÖVE version this game was made for
     t.window.width = 800              -- Game window width
     t.window.height = 600             -- Game window height
-    t.window.resizable = false        -- Let the window be user-resizable
+    t.window.resizable = true         -- Allow window to be resized with letterboxing/pillarboxing
     t.console = true                  -- Enable console for debug output
     
     -- For development

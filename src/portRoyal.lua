@@ -1,6 +1,8 @@
 -- Port Interface Module
 -- Currently focused on Port Royal but can be extended to all locations
 
+local AssetUtils = require('utils.assetUtils')
+
 local PortRoyal = {
     -- UI constants
     width = 800,
@@ -98,30 +100,24 @@ function PortRoyal:load(gameState)
         }
     }
     
-    -- Load placeholder background images if available
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port_royal_main.png")
-    end)
-    if success then
-        self.backgrounds.main = result
+    -- Validate required parameters
+    assert(gameState, "gameState is required for PortRoyal:load")
+    
+    -- Load placeholder background images using AssetUtils
+    self.backgrounds.main = AssetUtils.loadImage("assets/port_royal_main.png", "ui")
+    if self.backgrounds.main then
         print("Port Royal main background loaded")
     end
     
     -- Load tavern background
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port-royal-tavern.png")
-    end)
-    if success then
-        self.backgrounds.tavern = result
+    self.backgrounds.tavern = AssetUtils.loadImage("assets/port-royal-tavern.png", "ui")
+    if self.backgrounds.tavern then
         print("Port Royal tavern background loaded")
     end
     
     -- Load shipyard background
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port-royal-shipyard.png")
-    end)
-    if success then
-        self.backgrounds.shipyard = result
+    self.backgrounds.shipyard = AssetUtils.loadImage("assets/port-royal-shipyard.png", "ui")
+    if self.backgrounds.shipyard then
         print("Port Royal shipyard background loaded")
     end
 end
@@ -771,25 +767,21 @@ function PortRoyal:drawBackground(screen)
     local locationBackground = nil
     
     if screen == "main" then
-        local success, result = pcall(function()
-            return love.graphics.newImage("assets/" .. locationKey .. "_main.png")
-        end)
-        if success then
-            locationBackground = result
-        end
+        -- Use AssetUtils to load the location-specific background
+        locationBackground = AssetUtils.loadImage("assets/" .. locationKey .. "_main.png", "ui")
     end
     
     -- Check if we have a background image for this screen
     if locationBackground then
         -- We have a location-specific background
-        love.graphics.draw(locationBackground, 0, 0)
+        AssetUtils.drawImage(locationBackground, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "main" and self.backgrounds.main then
         -- Fall back to generic port background
-        love.graphics.draw(self.backgrounds.main, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.main, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "tavern" and self.backgrounds.tavern then
-        love.graphics.draw(self.backgrounds.tavern, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.tavern, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "shipyard" and self.backgrounds.shipyard then
-        love.graphics.draw(self.backgrounds.shipyard, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.shipyard, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     else
         -- Draw a fallback colored background
         if screen == "main" then

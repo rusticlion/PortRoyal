@@ -1,7 +1,2309 @@
 # PortRoyal Codebase Dump
-Generated: Wed Mar 26 23:42:26 CDT 2025
+Generated: Sat Mar 29 16:41:44 CDT 2025
 
 # Source Code
+
+## src/combat.lua
+```lua
+-- Combat System Module for Naval Battles
+-- Implements a hex grid battlefield and ship combat mechanics
+
+-- Import dice system
+local diceModule = require('dice')
+local diceSystem = diceModule.dice
+local Modifier = diceModule.Modifier
+
+-- Import ship utils
+local shipUtils = require('utils.shipUtils')
+
+-- Import constants
+local Constants = require('constants')
+
+local Combat = {
+    -- Constants for the hex grid
+    GRID_SIZE = Constants.COMBAT.GRID_SIZE,
+    HEX_RADIUS = Constants.UI.COMBAT.HEX_RADIUS,
+    HEX_HEIGHT = nil, -- Will be calculated based on radius
+    HEX_WIDTH = nil,  -- Will be calculated based on radius
+    
+    -- Grid display properties
+    gridOffsetX = Constants.UI.SCREEN_WIDTH / 2,  -- Position of grid on screen - will be centered
+    gridOffsetY = 235,  -- Will be dynamically adjusted based on UI layout
+    
+    -- State variables for the battle
+    hoveredHex = nil,   -- Currently hovered hex coordinates {q, r}
+    selectedHex = nil,  -- Currently selected hex coordinates
+    validMoves = {},    -- Valid move targets for selected ship
+    
+    -- Active battle data (will be stored in gameState.combat)
+    -- Included here as reference/documentation
+    --[[
+    battle = {
+        grid = {}, -- 2D array representing the hex grid
+        playerShip = {
+            class = "sloop",  -- Ship class (sloop, brigantine, galleon)
+            size = 1,         -- Number of hexes occupied
+            position = {5, 5}, -- {q, r} coordinates on grid
+            orientation = 0,   -- Direction ship is facing (0-5, representing 60° increments)
+            movesRemaining = 3 -- Based on ship speed
+        },
+        enemyShip = {
+            class = "sloop",
+            size = 1,
+            position = {2, 2},
+            orientation = 3,
+            movesRemaining = 3
+        },
+        turn = "player", -- Who's turn is it (player or enemy)
+        phase = "movement", -- Current phase (movement, attack, etc.)
+    }
+    --]]
+    
+    -- Action costs in crew points
+    actionCosts = {
+        fire = Constants.COMBAT.CP_COST_FIRE,     -- Fire Cannons costs
+        evade = Constants.COMBAT.CP_COST_EVADE,   -- Evade costs
+        repair = Constants.COMBAT.CP_COST_REPAIR  -- Repair costs (more labor intensive)
+    },
+    
+    -- Ship definitions for the hex grid (size, shape, movement patterns)
+    shipDefinitions = {
+        sloop = {
+            hexSize = 1,    -- Occupies 1 hex
+            shape = {{0, 0}}, -- Relative {q, r} coordinates for each hex
+            anchorOffset = {0, 0} -- Anchor point offset for sprite positioning
+        },
+        brigantine = {
+            hexSize = 2,    -- Occupies 2 hexes
+            -- Represents a ship that occupies 2 hexes in a line
+            shape = {{0, 0}, {1, 0}}, -- Relative coordinates from anchor point
+            anchorOffset = {0.5, 0} -- Anchor point is between the two hexes
+        },
+        galleon = {
+            hexSize = 4,    -- Occupies 4 hexes
+            -- Kite shape with 1 hex bow, 2 hex midship, 1 hex stern
+            shape = {{0, 0}, {0, 1}, {1, 0}, {-1, 0}}, -- Relative coordinates from anchor point
+            anchorOffset = {0, 0.5} -- Anchor point is in the middle of the kite shape
+        }
+    }
+}
+
+-- Initialize the combat system
+function Combat:load(gameState)
+    -- Calculate hex dimensions for drawing
+    -- For pointy-top hexagons
+    self.HEX_WIDTH = self.HEX_RADIUS * 2
+    self.HEX_HEIGHT = math.sqrt(3) * self.HEX_RADIUS
+    
+    -- Create combat state in gameState if it doesn't exist
+    if not gameState.combat then
+        gameState.combat = {}
+    end
+    
+    -- Load ship sprite assets
+    local AssetUtils = require('utils.assetUtils')
+    self.shipSprites = {
+        sloop = AssetUtils.loadImage("assets/sloop-top-down.png", "ship"),
+        brigantine = AssetUtils.loadImage("assets/brigantine-top-down.png", "ship"),
+        galleon = nil -- Placeholder for future galleon sprite
+    }
+    
+    -- Initialize the dice system
+    self:initDiceSystem()
+    
+    -- Debug feature - enable with F9 key in debug mode
+    self.showDebugHitboxes = false
+    
+    print("Combat system initialized")
+    print("Hex dimensions: " .. self.HEX_WIDTH .. "x" .. self.HEX_HEIGHT)
+end
+
+-- Initialize a new battle
+function Combat:initBattle(gameState, enemyShipClass)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:initBattle")
+    assert(gameState.ship, "gameState.ship is required for Combat:initBattle")
+    assert(gameState.ship.class, "gameState.ship.class is required for Combat:initBattle")
+    
+    -- Validate enemyShipClass if provided
+    if enemyShipClass and not self.shipDefinitions[enemyShipClass] then
+        print("WARNING: Unknown enemy ship class: " .. tostring(enemyShipClass) .. ". Defaulting to sloop.")
+        enemyShipClass = "sloop"
+    end
+    
+    -- Create a new grid
+    local grid = self:createEmptyGrid()
+    
+    -- Configure player ship based on gameState
+    local playerShipClass = gameState.ship.class
+    local playerShipSpeed = shipUtils.getBaseSpeed(playerShipClass)
+    
+    -- Create battle state
+    local battle = {
+        grid = grid,
+        playerShip = {
+            class = playerShipClass,
+            size = self.shipDefinitions[playerShipClass].hexSize,
+            position = {2, 8}, -- Bottom-left area
+            orientation = 0,   -- North-facing to start
+            movesRemaining = playerShipSpeed,
+            evadeScore = 0,    -- Evade score (reduces attacker's dice)
+            hasActed = false,  -- Whether ship has performed an action this turn
+            modifiers = {},    -- Active modifiers
+            crewPoints = gameState.crew.members and #gameState.crew.members or 1, -- Available crew points for actions
+            maxCrewPoints = gameState.crew.members and #gameState.crew.members or 1  -- Maximum crew points per turn
+        },
+        enemyShip = {
+            class = enemyShipClass or "sloop", -- Default to sloop if not specified
+            size = self.shipDefinitions[enemyShipClass or "sloop"].hexSize,
+            position = {7, 1}, -- Top-right area
+            orientation = 3,   -- South-facing to start
+            movesRemaining = shipUtils.getBaseSpeed(enemyShipClass or "sloop"),
+            durability = shipUtils.getMaxHP(enemyShipClass or "sloop"), -- Set HP based on ship class
+            evadeScore = 0,    -- Evade score (reduces attacker's dice)
+            hasActed = false,  -- Whether ship has performed an action this turn
+            modifiers = {},    -- Active modifiers
+            crewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop"), -- Based on ship class
+            maxCrewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop")
+        },
+        turn = "player",
+        phase = "movement",
+        actionResult = nil,    -- Stores result of the last action
+        turnCount = 1          -- Track number of turns
+    }
+    
+    -- Place ships on the grid
+    self:placeShipOnGrid(battle.grid, battle.playerShip, battle)
+    self:placeShipOnGrid(battle.grid, battle.enemyShip, battle)
+    
+    -- Store battle in gameState
+    gameState.combat = battle
+    
+    print("New naval battle initialized: " .. playerShipClass .. " vs " .. (enemyShipClass or "sloop"))
+    return battle
+end
+
+-- Create an empty hex grid
+function Combat:createEmptyGrid()
+    local grid = {}
+    for q = 0, self.GRID_SIZE - 1 do
+        grid[q] = {}
+        for r = 0, self.GRID_SIZE - 1 do
+            grid[q][r] = {
+                ship = nil,     -- Reference to ship in this hex
+                isPlayerShip = false, -- Flag for player ship
+                isEnemyShip = false,  -- Flag for enemy ship
+                content = "empty" -- Can be "empty", "ship", or other battlefield elements
+            }
+        end
+    end
+    return grid
+end
+
+-- Place a ship on the grid
+function Combat:placeShipOnGrid(grid, ship, battle)
+    local q, r = ship.position[1], ship.position[2]
+    local shape = self.shipDefinitions[ship.class].shape
+    
+    -- Transform shape based on orientation
+    local transformedShape = self:transformShapeByOrientation(shape, ship.orientation)
+    
+    -- Place the ship on each relevant hex
+    for _, offset in ipairs(transformedShape) do
+        local hexQ = q + offset[1]
+        local hexR = r + offset[2]
+        
+        -- Check if within grid bounds
+        if hexQ >= 0 and hexQ < self.GRID_SIZE and hexR >= 0 and hexR < self.GRID_SIZE then
+            grid[hexQ][hexR].ship = ship
+            grid[hexQ][hexR].content = "ship"
+            
+            -- Mark as player or enemy ship
+            if ship == battle.playerShip then
+                grid[hexQ][hexR].isPlayerShip = true
+            else
+                grid[hexQ][hexR].isEnemyShip = true
+            end
+        else
+            print("Warning: Ship placement outside grid bounds: " .. hexQ .. "," .. hexR)
+        end
+    end
+end
+
+-- Transform a ship's shape based on orientation (0-5 for 60° increments)
+function Combat:transformShapeByOrientation(shape, orientation)
+    local transformed = {}
+    
+    -- Apply rotation based on orientation
+    for _, hex in ipairs(shape) do
+        local q, r = hex[1], hex[2]
+        local newQ, newR
+        
+        -- Hex grid rotation formulas
+        if orientation == 0 then      -- 0° (North)
+            newQ, newR = q, r
+        elseif orientation == 1 then  -- 60° (Northeast)
+            newQ, newR = q + r, -q
+        elseif orientation == 2 then  -- 120° (Southeast)
+            newQ, newR = -r, q + r
+        elseif orientation == 3 then  -- 180° (South)
+            newQ, newR = -q, -r
+        elseif orientation == 4 then  -- 240° (Southwest)
+            newQ, newR = -q - r, q
+        elseif orientation == 5 then  -- 300° (Northwest)
+            newQ, newR = r, -q - r
+        end
+        
+        table.insert(transformed, {newQ, newR})
+    end
+    
+    return transformed
+end
+
+-- Get the hex at screen coordinates (x,y)
+function Combat:getHexFromScreen(x, y)
+    -- Approach: Find the closest hex center for maximum precision
+    local closestHex = nil
+    local minDistance = math.huge
+    
+    -- Try all grid hexes (brute force approach to guarantee accuracy)
+    for q = 0, self.GRID_SIZE - 1 do
+        for r = 0, self.GRID_SIZE - 1 do
+            -- Get hex center in pixel coordinates
+            local hexX, hexY = self:hexToScreen(q, r)
+            
+            -- Calculate distance from mouse to hex center
+            local dx = x - hexX
+            local dy = y - hexY
+            local dist = math.sqrt(dx*dx + dy*dy)
+            
+            -- Check if this is in the hex (hexagons have radius = self.HEX_RADIUS)
+            if dist <= self.HEX_RADIUS then
+                -- Inside this hex - return immediately
+                return {q, r}
+            end
+            
+            -- Otherwise track the closest hex
+            if dist < minDistance then
+                minDistance = dist
+                closestHex = {q, r}
+            end
+        end
+    end
+    
+    -- If mouse is close enough to the grid, return the closest hex
+    if minDistance < self.HEX_RADIUS * 2 then
+        return closestHex
+    end
+    
+    -- Mouse is too far from any hex
+    return nil
+end
+
+-- Round floating point hex coordinates to the nearest hex
+function Combat:roundHexCoord(q, r)
+    local s = -q - r
+    local rq = math.round(q)
+    local rr = math.round(r)
+    local rs = math.round(s)
+    
+    local qDiff = math.abs(rq - q)
+    local rDiff = math.abs(rr - r)
+    local sDiff = math.abs(rs - s)
+    
+    if qDiff > rDiff and qDiff > sDiff then
+        rq = -rr - rs
+    elseif rDiff > sDiff then
+        rr = -rq - rs
+    end
+    
+    return {rq, rr}
+end
+
+-- Helper function for Lua that mimics the math.round function from other languages
+function math.round(x)
+    return x >= 0 and math.floor(x + 0.5) or math.ceil(x - 0.5)
+end
+
+-- Get neighbors of a hex
+function Combat:getHexNeighbors(q, r)
+    local neighbors = {}
+    
+    -- Define different neighbors for even and odd rows in offset coordinates
+    if r % 2 == 0 then
+        -- Even row neighbors
+        neighbors = {
+            {q+1, r}, {q, r-1}, {q-1, r-1},
+            {q-1, r}, {q-1, r+1}, {q, r+1}
+        }
+    else
+        -- Odd row neighbors
+        neighbors = {
+            {q+1, r}, {q+1, r-1}, {q, r-1},
+            {q-1, r}, {q, r+1}, {q+1, r+1}
+        }
+    end
+    
+    -- Filter neighbors to ensure they're within grid bounds
+    local validNeighbors = {}
+    for _, neighbor in ipairs(neighbors) do
+        local nq, nr = neighbor[1], neighbor[2]
+        if nq >= 0 and nq < self.GRID_SIZE and nr >= 0 and nr < self.GRID_SIZE then
+            table.insert(validNeighbors, neighbor)
+        end
+    end
+    
+    return validNeighbors
+end
+
+-- Calculate valid moves for a ship from its current position
+function Combat:calculateValidMoves(battle, ship)
+    local q, r = ship.position[1], ship.position[2]
+    local movesRemaining = ship.movesRemaining
+    local validMoves = {}
+    
+    -- Use a breadth-first search to find all reachable hexes
+    local queue = {{q, r, 0}} -- {q, r, distance}
+    local visited = {[q .. "," .. r] = true}
+    
+    while #queue > 0 do
+        local current = table.remove(queue, 1)
+        local cq, cr, distance = current[1], current[2], current[3]
+        
+        if distance > 0 and distance <= movesRemaining then
+            table.insert(validMoves, {cq, cr})
+        end
+        
+        -- Only explore neighbors if within movement range
+        if distance < movesRemaining then
+            local neighbors = self:getHexNeighbors(cq, cr)
+            for _, neighbor in ipairs(neighbors) do
+                local nq, nr = neighbor[1], neighbor[2]
+                local key = nq .. "," .. nr
+                
+                -- Skip if already visited
+                if not visited[key] then
+                    -- Skip if occupied by a ship
+                    if battle.grid[nq][nr].content ~= "ship" then
+                        visited[key] = true
+                        table.insert(queue, {nq, nr, distance + 1})
+                    end
+                end
+            end
+        end
+    end
+    
+    return validMoves
+end
+
+-- Move a ship to a new position
+function Combat:moveShip(battle, ship, newQ, newR)
+    -- Store old position for distance calculation
+    local oldQ, oldR = ship.position[1], ship.position[2]
+    
+    -- Clear ship from old position
+    for q = 0, self.GRID_SIZE - 1 do
+        for r = 0, self.GRID_SIZE - 1 do
+            if battle.grid[q][r].ship == ship then
+                battle.grid[q][r].ship = nil
+                battle.grid[q][r].content = "empty"
+                battle.grid[q][r].isPlayerShip = false
+                battle.grid[q][r].isEnemyShip = false
+            end
+        end
+    end
+    
+    -- Update ship position
+    ship.position = {newQ, newR}
+    
+    -- Place ship at new position
+    self:placeShipOnGrid(battle.grid, ship, battle)
+    
+    -- Update moves remaining
+    local distance = self:hexDistance(oldQ, oldR, newQ, newR)
+    ship.movesRemaining = ship.movesRemaining - distance
+    
+    return true
+end
+
+-- Calculate distance between two hexes in the offset coordinate system
+function Combat:hexDistance(q1, r1, q2, r2)
+    -- Convert from offset coordinates to cube coordinates
+    local x1, y1, z1 = self:offsetToCube(q1, r1)
+    local x2, y2, z2 = self:offsetToCube(q2, r2)
+    
+    -- Use cube coordinate distance formula
+    return math.max(math.abs(x1 - x2), math.abs(y1 - y2), math.abs(z1 - z2))
+end
+
+-- Convert offset coordinates to cube coordinates
+function Combat:offsetToCube(q, r)
+    local parity = r % 2  -- r mod 2, gives 0 for even rows and 1 for odd rows
+    local x = q - (r - parity) / 2
+    local z = r
+    local y = -x - z
+    return x, y, z
+end
+
+-- Convert hex coordinates to screen coordinates
+function Combat:hexToScreen(q, r)
+    -- For pointy-top hexagons
+    local hexWidth = self.HEX_RADIUS * math.sqrt(3)
+    local hexHeight = self.HEX_RADIUS * 2
+    
+    -- Calculate the total grid size in pixels
+    -- For a pointy-top hex grid with brick layout pattern
+    local gridWidthInHexes = self.GRID_SIZE
+    local gridHeightInHexes = self.GRID_SIZE
+    
+    -- Total width = width of a column of hexes * number of columns
+    local totalGridWidth = hexWidth * gridWidthInHexes
+    -- Total height = height of a hex * number of rows, accounting for overlap
+    local totalGridHeight = hexHeight * 0.75 * gridHeightInHexes + hexHeight * 0.25
+    
+    -- Make sure we have proper grid center coordinates
+    -- This should be exactly the center of the available play area
+    local centerX = self.gridOffsetX
+    local centerY = self.gridOffsetY
+    
+    -- Calculate grid origin (top-left corner of the hex grid itself)
+    -- This centers the actual hex grid within whatever panel is showing it
+    local gridOriginX = centerX - (totalGridWidth / 2)
+    local gridOriginY = centerY - (totalGridHeight / 2)
+    
+    -- Calculate the position for this specific hex
+    local hexX = gridOriginX + (q * hexWidth)
+    local hexY = gridOriginY + (r * hexHeight * 0.75)
+    
+    -- Apply horizontal offset for odd rows (brick pattern layout)
+    if r % 2 == 1 then
+        hexX = hexX + (hexWidth / 2)
+    end
+    
+    return hexX, hexY
+end
+
+-- Update combat state
+function Combat:update(dt, gameState)
+    if not gameState.combat then return end
+    
+    local battle = gameState.combat
+    
+    -- Update game logic here
+    -- For now, we're just focusing on the movement mechanics
+end
+
+-- Draw the hex grid and ships
+function Combat:draw(gameState)
+    if not gameState.combat then return end
+    
+    local battle = gameState.combat
+    
+    -- Define fixed UI layout constants for our 800x600 reference resolution
+    local SCREEN_WIDTH = 800
+    local SCREEN_HEIGHT = 600
+    local TOP_BAR_HEIGHT = 30     -- Reduced height for top status bar
+    local BOTTOM_BAR_HEIGHT = 80  -- Height for action buttons and instructions
+    
+    -- Calculate available space for the battle grid
+    -- Move grid up slightly to make more room for action feedback panel
+    local GRID_TOP = TOP_BAR_HEIGHT + 5  -- Reduced top margin
+    local GRID_BOTTOM = SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT - 15 -- Added more space at bottom
+    local GRID_HEIGHT = GRID_BOTTOM - GRID_TOP
+    
+    -- Define sidebar width
+    local sidebarWidth = 140
+    
+    -- Calculate true hex dimensions for a pointy-top hex
+    local hexWidth = self.HEX_RADIUS * math.sqrt(3)
+    local hexHeight = self.HEX_RADIUS * 2
+    
+    -- Calculate the total grid dimensions more accurately
+    -- For a pointy-top hex grid with brick layout pattern
+    local totalGridWidth = hexWidth * self.GRID_SIZE
+    local totalGridHeight = (hexHeight * 0.75 * self.GRID_SIZE) + (hexHeight * 0.25)
+    
+    -- Store dimensions for other methods
+    self.gridScreenHeight = GRID_HEIGHT
+    self.gridScreenWidth = totalGridWidth
+    
+    -- Define available center area (excluding sidebars)
+    local availableWidth = SCREEN_WIDTH - (sidebarWidth * 2)
+    
+    -- Center coordinates of the play area (excluding sidebars)
+    local centerX = SCREEN_WIDTH / 2
+    local centerY = GRID_TOP + ((GRID_BOTTOM - GRID_TOP) / 2)
+    
+    -- Store these coordinates for the grid drawing functions
+    self.gridOffsetX = centerX
+    self.gridOffsetY = centerY
+    
+    -- Save play area constants for other functions
+    self.layoutConstants = {
+        topBarHeight = TOP_BAR_HEIGHT,
+        gridTop = GRID_TOP,
+        gridBottom = GRID_BOTTOM,
+        sidebarWidth = sidebarWidth,
+        bottomBarHeight = BOTTOM_BAR_HEIGHT,
+        screenWidth = SCREEN_WIDTH,
+        screenHeight = SCREEN_HEIGHT,
+        availableWidth = availableWidth
+    }
+    
+    -- Draw background and grid
+    self:drawBackground(centerX, centerY, SCREEN_WIDTH, SCREEN_HEIGHT, gameState.settings.debug)
+    self:drawGridBackground(GRID_TOP, GRID_HEIGHT, sidebarWidth, availableWidth)
+    self:drawHexes(battle, gameState.settings.debug)
+    
+    -- Draw ships on top of hexes for better visibility
+    self:drawShips(battle)
+    
+    -- Draw UI elements using the layout constants
+    self:drawUI(gameState)
+    
+    -- Draw debug info if needed
+    if gameState.settings.debug then
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.print("Grid offset: " .. self.gridOffsetX .. ", " .. self.gridOffsetY, 10, 550)
+        love.graphics.print("Grid dims: " .. totalGridWidth .. "x" .. totalGridHeight, 10, 570)
+        love.graphics.print("Play area: " .. GRID_TOP .. "-" .. GRID_BOTTOM, 200, 570)
+    end
+end
+
+-- Draw the battle background
+function Combat:drawBackground(centerX, centerY, screenWidth, screenHeight, showDebug)
+    -- Draw the entire battle area background first
+    love.graphics.setColor(Constants.COLORS.UI_BACKGROUND) -- Very dark blue/black background
+    love.graphics.rectangle("fill", 0, 0, screenWidth, screenHeight)
+    
+    -- If debug mode is on, draw a small dot at the exact center for reference
+    if showDebug then
+        love.graphics.setColor(1, 0, 0, 0.8)
+        love.graphics.circle("fill", centerX, centerY, 3)
+    end
+end
+
+-- Draw the grid background (sea area)
+function Combat:drawGridBackground(gridTop, gridHeight, sidebarWidth, availableWidth)
+    -- Calculate grid background dimensions to fill available space between sidebars
+    local gridAreaWidth = availableWidth - 20  -- -20 for small margin on each side
+    local gridAreaHeight = gridHeight - 20    -- -20 for small margin on top and bottom
+    
+    -- Calculate the top-left corner of the grid background
+    local gridAreaX = sidebarWidth + 10 -- Left sidebar width + small margin
+    local gridAreaY = gridTop + 10     -- Top bar + small margin
+    
+    -- Draw grid background (sea)
+    love.graphics.setColor(Constants.COLORS.SEA) -- Dark blue water
+    love.graphics.rectangle("fill", 
+        gridAreaX, 
+        gridAreaY, 
+        gridAreaWidth, 
+        gridAreaHeight,
+        5, 5 -- Rounded corners
+    )
+    
+    -- Grid border
+    love.graphics.setColor(Constants.COLORS.SEA_BORDER) -- Lighter blue border
+    love.graphics.rectangle("line", 
+        gridAreaX, 
+        gridAreaY, 
+        gridAreaWidth, 
+        gridAreaHeight,
+        5, 5 -- Rounded corners
+    )
+end
+
+-- Draw grid hexes
+function Combat:drawHexes(battle, showDebug)
+    for q = 0, self.GRID_SIZE - 1 do
+        for r = 0, self.GRID_SIZE - 1 do
+            local x, y = self:hexToScreen(q, r)
+            
+            -- Determine hex color based on content
+            if battle.grid[q][r].isPlayerShip then
+                -- Green for player ship (more transparent)
+                love.graphics.setColor(Constants.COLORS.PLAYER_SHIP[1], Constants.COLORS.PLAYER_SHIP[2], 
+                                      Constants.COLORS.PLAYER_SHIP[3], 0.5)
+            elseif battle.grid[q][r].isEnemyShip then
+                -- Red for enemy ship (more transparent)
+                love.graphics.setColor(Constants.COLORS.ENEMY_SHIP[1], Constants.COLORS.ENEMY_SHIP[2], 
+                                      Constants.COLORS.ENEMY_SHIP[3], 0.5)
+            elseif self.hoveredHex and self.hoveredHex[1] == q and self.hoveredHex[2] == r then
+                love.graphics.setColor(Constants.COLORS.HOVER) -- Yellow for hover
+            elseif self.selectedHex and self.selectedHex[1] == q and self.selectedHex[2] == r then
+                love.graphics.setColor(Constants.COLORS.SELECTED) -- Cyan for selected
+            elseif self:isValidMove(q, r) then
+                love.graphics.setColor(Constants.COLORS.VALID_MOVE) -- Light blue for valid moves
+            else
+                love.graphics.setColor(Constants.COLORS.EMPTY_WATER) -- Blue for empty water
+            end
+            
+            -- Draw hex
+            self:drawHex(x, y)
+            
+            -- Draw grid coordinates for debugging
+            if showDebug then
+                love.graphics.setColor(1, 1, 1, 0.7)
+                love.graphics.print(q .. "," .. r, x - 10, y)
+            end
+        end
+    end
+end
+
+-- Draw a single hexagon at position x,y
+function Combat:drawHex(x, y)
+    local vertices = {}
+    for i = 0, 5 do
+        local angle = math.pi / 3 * i + math.pi / 6 -- Pointy-top orientation
+        table.insert(vertices, x + self.HEX_RADIUS * math.cos(angle))
+        table.insert(vertices, y + self.HEX_RADIUS * math.sin(angle))
+    end
+    
+    -- Fill hex
+    love.graphics.polygon("fill", vertices)
+    
+    -- Draw hex outline
+    love.graphics.setColor(1, 1, 1, 0.3)
+    love.graphics.polygon("line", vertices)
+end
+
+-- Check if hex coordinates are in the valid moves list
+function Combat:isValidMove(q, r)
+    for _, move in ipairs(self.validMoves) do
+        if move[1] == q and move[2] == r then
+            return true
+        end
+    end
+    return false
+end
+
+-- Draw ships with proper shapes and orientations
+function Combat:drawShips(battle)
+    -- Draw player ship
+    local playerShip = battle.playerShip
+    local pq, pr = playerShip.position[1], playerShip.position[2]
+    
+    -- Check if player ship is selected for movement
+    local isSelected = false
+    if self.selectedHex and 
+       self.selectedHex[1] == pq and 
+       self.selectedHex[2] == pr then
+        isSelected = true
+    end
+    
+    -- Draw player ship based on class using the multi-hex approach
+    self:drawShipByClass(playerShip, true, isSelected, battle)
+    
+    -- Draw enemy ship
+    local enemyShip = battle.enemyShip
+    
+    -- Draw enemy ship based on class using the multi-hex approach
+    self:drawShipByClass(enemyShip, false, false, battle)
+end
+
+-- Draw a ship with appropriate shape based on class and orientation
+-- This is the main function for drawing ships on the combat grid
+function Combat:drawShipByClass(ship, isPlayer, isSelected, battle)
+    local shipClass = ship.class
+    local orientation = ship.orientation
+    local anchorQ, anchorR = ship.position[1], ship.position[2]
+    local scale = 1.0
+    
+    -- Set base color based on player/enemy
+    local baseColor = isPlayer and Constants.COLORS.PLAYER_SHIP or Constants.COLORS.ENEMY_SHIP
+    local outlineColor = {1, 1, 1, 0.8}
+    
+    -- Get the ship's shape and transform it based on orientation
+    local shape = self.shipDefinitions[shipClass].shape
+    local transformedShape = self:transformShapeByOrientation(shape, orientation)
+    
+    -- Draw each hex that the ship occupies
+    for _, offset in ipairs(transformedShape) do
+        local hexQ = anchorQ + offset[1]
+        local hexR = anchorR + offset[2]
+        
+        -- Check if within grid bounds
+        if hexQ >= 0 and hexQ < self.GRID_SIZE and hexR >= 0 and hexR < self.GRID_SIZE then
+            -- Draw hex outline to indicate ship occupation
+            local hexX, hexY = self:hexToScreen(hexQ, hexR)
+            
+            -- Draw colored hex background for occupied hexes
+            local hexColor = isPlayer and {0.2, 0.8, 0.2, 0.3} or {0.8, 0.2, 0.2, 0.3}
+            love.graphics.setColor(hexColor)
+            self:drawHex(hexX, hexY)
+            
+            -- Draw hex border with ship color
+            love.graphics.setColor(baseColor[1], baseColor[2], baseColor[3], 0.7)
+            self:drawHexOutline(hexX, hexY)
+        end
+    end
+    
+    -- Calculate the ship's center position 
+    local anchorOffset = self.shipDefinitions[shipClass].anchorOffset or {0, 0}
+    local centerHexQ = anchorQ + anchorOffset[1]
+    local centerHexR = anchorR + anchorOffset[2]
+    local centerX, centerY = self:hexToScreen(centerHexQ, centerHexR)
+    
+    -- Draw the ship sprite at the center position
+    local sprite = self.shipSprites[shipClass]
+    
+    -- Angle based on orientation (60 degrees per orientation step)
+    local angle = orientation * math.pi / 3
+    
+    if sprite then
+        -- Draw the sprite with proper orientation and scale
+        love.graphics.setColor(1, 1, 1, 1)
+        
+        -- Scale the sprite to fit within the hex
+        local spriteWidth = sprite:getWidth()
+        local spriteHeight = sprite:getHeight()
+        local maxDimension = self.HEX_RADIUS * 1.5
+        
+        -- Calculate scale based on sprite size and hex size
+        local scaleX = maxDimension / spriteWidth
+        local scaleY = maxDimension / spriteHeight
+        local spriteScale = math.min(scaleX, scaleY) * scale
+        
+        -- Draw rotated sprite centered on the ship's position
+        love.graphics.draw(
+            sprite, 
+            centerX, centerY, 
+            angle, 
+            spriteScale, spriteScale, 
+            spriteWidth / 2, spriteHeight / 2
+        )
+    else
+        -- Use the fallback geometric shape rendering if sprite is missing
+        self:drawShipFallbackShape(centerX, centerY, shipClass, orientation, baseColor, outlineColor, scale)
+    end
+    
+    -- Ship sprite is already rotated to show orientation - no need for extra indicators
+    
+    -- Draw a selection indicator if the ship is selected
+    if isSelected then
+        -- Draw a highlight around the entire ship
+        for _, offset in ipairs(transformedShape) do
+            local hexQ = anchorQ + offset[1]
+            local hexR = anchorR + offset[2]
+            
+            if hexQ >= 0 and hexQ < self.GRID_SIZE and hexR >= 0 and hexR < self.GRID_SIZE then
+                local x, y = self:hexToScreen(hexQ, hexR)
+                love.graphics.setColor(1, 1, 0, 0.5) -- Yellow highlight
+                self:drawHexOutline(x, y)
+            end
+        end
+        
+        -- Draw a pulsing highlight effect on the anchor hex
+        local anchorX, anchorY = self:hexToScreen(anchorQ, anchorR)
+        local pulseScale = 1.0 + math.sin(love.timer.getTime() * 4) * 0.1
+        love.graphics.setColor(1, 1, 0, 0.7) -- Yellow highlight
+        love.graphics.circle("line", anchorX, anchorY, self.HEX_RADIUS * 0.5 * pulseScale)
+    end
+end
+
+-- Draw a hex outline without fill
+function Combat:drawHexOutline(x, y)
+    local vertices = {}
+    for i = 0, 5 do
+        local angle = math.pi / 3 * i + math.pi / 6 -- Pointy-top orientation
+        table.insert(vertices, x + self.HEX_RADIUS * math.cos(angle))
+        table.insert(vertices, y + self.HEX_RADIUS * math.sin(angle))
+    end
+    
+    -- Draw hex outline
+    love.graphics.polygon("line", vertices)
+end
+
+-- Draw a ship icon for UI elements like sidebars
+function Combat:drawShipIconForUI(x, y, shipClass, orientation, isPlayer, isSelected, scale)
+    -- Set default scale if not provided
+    scale = scale or 1.0
+    
+    -- Set base color based on player/enemy
+    local baseColor = isPlayer and Constants.COLORS.PLAYER_SHIP or Constants.COLORS.ENEMY_SHIP
+    local outlineColor = {1, 1, 1, 0.8}
+    
+    -- Draw the ship sprite at the center position if available
+    local sprite = self.shipSprites[shipClass]
+    
+    -- Angle based on orientation (60 degrees per orientation step)
+    local angle = orientation * math.pi / 3
+    
+    if sprite then
+        -- Draw the sprite with proper orientation and scale
+        love.graphics.setColor(1, 1, 1, 1)
+        
+        -- Scale the sprite to fit within the icon area
+        local spriteWidth = sprite:getWidth()
+        local spriteHeight = sprite:getHeight()
+        local maxDimension = self.HEX_RADIUS * 1.5 * scale
+        
+        -- Calculate scale based on sprite size and desired icon size
+        local scaleX = maxDimension / spriteWidth
+        local scaleY = maxDimension / spriteHeight
+        local spriteScale = math.min(scaleX, scaleY)
+        
+        -- Draw rotated sprite
+        love.graphics.draw(
+            sprite, 
+            x, y, 
+            angle, 
+            spriteScale, spriteScale, 
+            spriteWidth / 2, spriteHeight / 2
+        )
+    else
+        -- Use fallback geometric shape if sprite is missing
+        self:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, outlineColor, scale)
+    end
+    
+    -- Ship sprite is already rotated to show orientation
+    -- No need for additional direction indicators as the sprite rotation is sufficient
+    
+    -- Draw selection indicator if needed
+    if isSelected then
+        love.graphics.setColor(1, 1, 0, 0.7) -- Yellow highlight
+        love.graphics.circle("line", x, y, self.HEX_RADIUS * 0.8 * scale)
+    end
+end
+
+-- Fallback shape rendering for ships without sprites
+function Combat:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, outlineColor, scale)
+    -- Set default scale if not provided
+    scale = scale or 1.0
+    
+    -- Calculate ship points based on orientation
+    local points = {}
+    
+    if shipClass == "sloop" then
+        -- Simple triangular shape for sloop
+        local size = self.HEX_RADIUS * 0.7 * scale
+        
+        -- Define the triangle points based on orientation
+        if orientation == 0 then -- North
+            points = {
+                x, y - size,          -- Bow
+                x - size * 0.7, y + size * 0.5,  -- Port (left) corner
+                x + size * 0.7, y + size * 0.5   -- Starboard (right) corner
+            }
+        elseif orientation == 1 then -- Northeast
+            points = {
+                x + size * 0.87, y - size * 0.5,  -- Bow
+                x - size * 0.5, y - size * 0.87,  -- Port corner
+                x + size * 0.5, y + size * 0.87   -- Starboard corner
+            }
+        elseif orientation == 2 then -- Southeast
+            points = {
+                x + size * 0.87, y + size * 0.5,  -- Bow
+                x + size * 0.5, y - size * 0.87,  -- Port corner
+                x - size * 0.5, y + size * 0.87   -- Starboard corner
+            }
+        elseif orientation == 3 then -- South
+            points = {
+                x, y + size,          -- Bow
+                x + size * 0.7, y - size * 0.5,  -- Port corner
+                x - size * 0.7, y - size * 0.5   -- Starboard corner
+            }
+        elseif orientation == 4 then -- Southwest
+            points = {
+                x - size * 0.87, y + size * 0.5,  -- Bow
+                x + size * 0.5, y + size * 0.87,  -- Port corner
+                x - size * 0.5, y - size * 0.87   -- Starboard corner
+            }
+        elseif orientation == 5 then -- Northwest
+            points = {
+                x - size * 0.87, y - size * 0.5,  -- Bow
+                x - size * 0.5, y + size * 0.87,  -- Port corner
+                x + size * 0.5, y - size * 0.87   -- Starboard corner
+            }
+        end
+        
+        -- Draw the ship
+        love.graphics.setColor(baseColor)
+        love.graphics.polygon("fill", points)
+        love.graphics.setColor(outlineColor)
+        love.graphics.polygon("line", points)
+        
+    elseif shipClass == "brigantine" then
+        -- More complex rectangular shape for brigantine
+        local sizeX = self.HEX_RADIUS * 0.85 * scale
+        local sizeY = self.HEX_RADIUS * 0.5 * scale
+        
+        -- Create a rectangle and rotate it based on orientation
+        local points = {
+            -sizeX, -sizeY,   -- Top-left
+            sizeX, -sizeY,    -- Top-right
+            sizeX, sizeY,     -- Bottom-right
+            -sizeX, sizeY     -- Bottom-left
+        }
+        
+        -- Adjust rotation based on orientation
+        local angle = orientation * math.pi / 3
+        
+        -- Rotate and translate points
+        local rotatedPoints = {}
+        for i = 1, #points, 2 do
+            local px, py = points[i], points[i+1]
+            
+            -- Rotate
+            local rx = px * math.cos(angle) - py * math.sin(angle)
+            local ry = px * math.sin(angle) + py * math.cos(angle)
+            
+            -- Translate
+            rotatedPoints[i] = x + rx
+            rotatedPoints[i+1] = y + ry
+        end
+        
+        -- Draw the ship
+        love.graphics.setColor(baseColor)
+        love.graphics.polygon("fill", rotatedPoints)
+        love.graphics.setColor(outlineColor)
+        love.graphics.polygon("line", rotatedPoints)
+        
+    elseif shipClass == "galleon" then
+        -- Big ship with kite shape for galleon
+        local size = self.HEX_RADIUS * 0.9 * scale
+        
+        -- Kite shape points
+        local points = {
+            0, -size,        -- Top (bow)
+            size/2, 0,       -- Right (midship)
+            0, size,         -- Bottom (stern)
+            -size/2, 0       -- Left (midship)
+        }
+        
+        -- Adjust rotation based on orientation
+        local angle = orientation * math.pi / 3
+        
+        -- Rotate and translate points
+        local rotatedPoints = {}
+        for i = 1, #points, 2 do
+            local px, py = points[i], points[i+1]
+            
+            -- Rotate
+            local rx = px * math.cos(angle) - py * math.sin(angle)
+            local ry = px * math.sin(angle) + py * math.cos(angle)
+            
+            -- Translate
+            rotatedPoints[i] = x + rx
+            rotatedPoints[i+1] = y + ry
+        end
+        
+        -- Draw the galleon body
+        love.graphics.setColor(baseColor)
+        love.graphics.polygon("fill", rotatedPoints)
+        love.graphics.setColor(outlineColor)
+        love.graphics.polygon("line", rotatedPoints)
+    else
+        -- Fallback to simple circle for unknown ship types
+        love.graphics.setColor(baseColor)
+        love.graphics.circle("fill", x, y, self.HEX_RADIUS * 0.7 * scale)
+        love.graphics.setColor(outlineColor)
+        love.graphics.circle("line", x, y, self.HEX_RADIUS * 0.7 * scale)
+    end
+end
+
+-- Draw UI elements for the battle
+function Combat:drawUI(gameState)
+    local battle = gameState.combat
+    
+    -- Use layout constants from draw function
+    local layout = self.layoutConstants
+    if not layout then return end
+    
+    -- Calculate player/enemy stats
+    local playerMaxHP = shipUtils.getMaxHP(battle.playerShip.class)
+    local playerHP = gameState.ship.durability
+    local playerHP_Percent = playerHP / playerMaxHP
+    
+    local enemyMaxHP = shipUtils.getMaxHP(battle.enemyShip.class)
+    local enemyHP = battle.enemyShip.durability
+    local enemyHP_Percent = enemyHP / enemyMaxHP
+    
+    -- Draw top status bar
+    self:drawTopBar(battle, layout.screenWidth)
+    
+    -- Draw player and enemy sidebars
+    self:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, playerHP_Percent, layout)
+    self:drawEnemySidebar(battle, enemyHP, enemyMaxHP, enemyHP_Percent, layout)
+    
+    -- Draw action feedback panel if we have a result
+    local buttonsY = self:drawFeedbackPanel(battle, layout)
+    
+    -- Draw action buttons panel based on the game phase
+    self:drawActionPanel(battle, buttonsY, layout)
+    
+    -- Draw instructions panel
+    self:drawInstructionsPanel(battle, buttonsY, layout)
+end
+
+-- Draw the top status bar
+function Combat:drawTopBar(battle, screenWidth)
+    local topBarHeight = self.layoutConstants.topBarHeight
+    
+    -- Draw the panel background
+    self:drawUIPanel(0, 0, screenWidth, topBarHeight)
+    
+    -- Battle status indicator (left)
+    local statusColor = Constants.COLORS.PLAYER_SHIP -- Green for player turn
+    local statusText = "YOUR TURN"
+    if battle.turn ~= "player" then
+        statusColor = Constants.COLORS.ENEMY_SHIP -- Red for enemy turn
+        statusText = "ENEMY TURN"
+    end
+    
+    love.graphics.setColor(statusColor)
+    love.graphics.print(statusText, 20, 8)
+    
+    -- Phase indicator (center)
+    love.graphics.setColor(1, 1, 1, 0.9)
+    love.graphics.printf("PHASE: " .. battle.phase:upper(), 0, 8, screenWidth, "center")
+    
+    -- Turn counter (right)
+    love.graphics.setColor(1, 0.9, 0.3, 0.9) -- Yellow-gold for turn counter
+    love.graphics.print("TURN: " .. battle.turnCount, screenWidth - 80, 8)
+end
+
+-- Draw the player's sidebar
+function Combat:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, playerHP_Percent, layout)
+    local gridTop = layout.gridTop
+    local gridBottom = layout.gridBottom
+    local sidebarWidth = layout.sidebarWidth
+    
+    -- Draw the sidebar panel
+    self:drawUIPanel(5, gridTop, sidebarWidth - 10, gridBottom - gridTop)
+    
+    -- Player ship title with class icon
+    love.graphics.setColor(0.2, 0.7, 0.9, 1) -- Blue for player
+    love.graphics.print("YOUR SHIP", 15, gridTop + 10)
+    love.graphics.print(string.upper(battle.playerShip.class), 15, gridTop + 30)
+    
+    -- Ship type icon or simple ship silhouette
+    self:drawShipIconForUI(75, gridTop + 65, battle.playerShip.class, 0, true, false, 0.8)
+    
+    -- Draw player ship HP bar
+    love.graphics.setColor(Constants.COLORS.UI_TEXT)
+    love.graphics.print("DURABILITY:", 15, gridTop + 120)
+    self:drawProgressBar(15, gridTop + 140, sidebarWidth - 30, 16, playerHP_Percent, Constants.COLORS.HEALTH, Constants.COLORS.DAMAGE)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(playerHP .. "/" .. playerMaxHP, 50, gridTop + 142)
+    
+    -- Draw moves or crew points based on phase
+    if battle.phase == "movement" then
+        self:drawMovementInfo(battle.playerShip, gridTop, sidebarWidth)
+    else
+        self:drawCrewPointsInfo(battle.playerShip, gridTop, sidebarWidth)
+    end
+    
+    -- Draw evade score if active
+    if battle.playerShip.evadeScore > 0 then
+        love.graphics.setColor(0.3, 0.8, 0.9, 1)
+        love.graphics.print("EVADE SCORE: " .. battle.playerShip.evadeScore, 15, gridTop + 210)
+    end
+    
+    -- Draw week counter at bottom of player panel
+    love.graphics.setColor(0.8, 0.8, 0.8, 0.7)
+    love.graphics.print("WEEK: " .. gameState.time.currentWeek, 15, gridBottom - 30)
+end
+
+-- Draw movement info for a ship
+function Combat:drawMovementInfo(ship, gridTop, sidebarWidth)
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("MOVEMENT:", 15, gridTop + 165)
+    local baseSpeed = shipUtils.getBaseSpeed(ship.class)
+    local movePercent = ship.movesRemaining / baseSpeed
+    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, movePercent, Constants.COLORS.BUTTON_EVADE, Constants.COLORS.UI_BORDER)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(ship.movesRemaining .. "/" .. baseSpeed, 50, gridTop + 187)
+end
+
+-- Draw crew points info for a ship
+function Combat:drawCrewPointsInfo(ship, gridTop, sidebarWidth)
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("CREW POINTS:", 15, gridTop + 165)
+    local cpPercent = ship.crewPoints / ship.maxCrewPoints
+    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, cpPercent, Constants.COLORS.GOLD, {0.5, 0.4, 0.1, 1})
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(ship.crewPoints .. "/" .. ship.maxCrewPoints, 50, gridTop + 187)
+end
+
+-- Draw the enemy sidebar
+function Combat:drawEnemySidebar(battle, enemyHP, enemyMaxHP, enemyHP_Percent, layout)
+    local gridTop = layout.gridTop
+    local gridBottom = layout.gridBottom
+    local sidebarWidth = layout.sidebarWidth
+    local screenWidth = layout.screenWidth
+    
+    -- Draw the sidebar panel
+    self:drawUIPanel(screenWidth - sidebarWidth + 5, gridTop, sidebarWidth - 10, gridBottom - gridTop)
+    
+    -- Enemy ship title
+    love.graphics.setColor(0.9, 0.3, 0.3, 1) -- Red for enemy
+    love.graphics.print("ENEMY SHIP", screenWidth - sidebarWidth + 15, gridTop + 10)
+    love.graphics.print(string.upper(battle.enemyShip.class), screenWidth - sidebarWidth + 15, gridTop + 30)
+    
+    -- Draw a simple ship outline based on class
+    self:drawShipIconForUI(screenWidth - sidebarWidth + 75, gridTop + 65, battle.enemyShip.class, 3, false, false, 0.8)
+    
+    -- Draw enemy ship HP bar
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("DURABILITY:", screenWidth - sidebarWidth + 15, gridTop + 120)
+    self:drawProgressBar(screenWidth - sidebarWidth + 15, gridTop + 140, sidebarWidth - 30, 16, 
+                        enemyHP_Percent, {0.2, 0.8, 0.2, 1}, {0.8, 0.2, 0.2, 1})
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(enemyHP .. "/" .. enemyMaxHP, screenWidth - sidebarWidth + 50, gridTop + 142)
+    
+    -- Draw enemy ship additional info
+    if battle.enemyShip.evadeScore > 0 then
+        love.graphics.setColor(0.9, 0.7, 0.3, 1)
+        love.graphics.print("EVADE SCORE: " .. battle.enemyShip.evadeScore, screenWidth - sidebarWidth + 15, gridTop + 165)
+    end
+end
+
+-- Draw the action feedback panel
+function Combat:drawFeedbackPanel(battle, layout)
+    local screenWidth = layout.screenWidth
+    local screenHeight = layout.screenHeight
+    local gridBottom = layout.gridBottom
+    local sidebarWidth = layout.sidebarWidth
+    local FEEDBACK_HEIGHT = Constants.UI.COMBAT.FEEDBACK_HEIGHT
+    local CONTROLS_HEIGHT = Constants.UI.COMBAT.CONTROLS_HEIGHT
+    local INSTRUCTIONS_HEIGHT = Constants.UI.COMBAT.INSTRUCTIONS_HEIGHT
+    
+    -- Will be set based on whether feedback is shown
+    local buttonsY = 0
+    
+    if battle.actionResult then
+        -- Position the feedback panel below the grid but keep room for buttons
+        local feedbackY = gridBottom + 5
+        
+        -- Make sure there's room for the feedback panel and buttons
+        local totalNeededHeight = FEEDBACK_HEIGHT + CONTROLS_HEIGHT + INSTRUCTIONS_HEIGHT + 10
+        local availableHeight = screenHeight - gridBottom - 5
+        
+        if totalNeededHeight > availableHeight then
+            -- Not enough space - make room by moving up
+            local extraNeeded = totalNeededHeight - availableHeight
+            feedbackY = feedbackY - extraNeeded
+        end
+        
+        -- Action result panel with translucent dark background
+        self:drawUIPanel(sidebarWidth + 5, feedbackY, screenWidth - (sidebarWidth * 2) - 10, FEEDBACK_HEIGHT)
+        
+        -- Draw the action result content
+        self:drawActionResultContent(battle.actionResult, feedbackY, sidebarWidth, screenWidth)
+        
+        buttonsY = feedbackY + FEEDBACK_HEIGHT + 5  -- Position buttons below feedback panel
+    else
+        -- If no feedback, buttons go at the bottom of the grid area
+        buttonsY = gridBottom + 5  -- Small gap between grid and buttons
+    end
+    
+    return buttonsY
+end
+
+-- Draw the content of the action result panel
+function Combat:drawActionResultContent(actionResult, feedbackY, sidebarWidth, screenWidth)
+    -- Action title
+    local title
+    -- Check if action was successful or failed due to lack of crew points
+    if actionResult.success == false then
+        -- Failed action due to insufficient crew points
+        title = actionResult.message
+        love.graphics.setColor(1, 0.3, 0.3, 1)  -- Red for error message
+    else
+        -- Successful action
+        if actionResult.action == "fire" then
+            love.graphics.setColor(0.9, 0.3, 0.3, 1) -- Red for attack
+            title = (actionResult.attacker == "player" and "YOU FIRED CANNONS" or "ENEMY FIRED CANNONS")
+            title = title .. " - DAMAGE: " .. actionResult.damage
+        elseif actionResult.action == "evade" then
+            love.graphics.setColor(0.3, 0.6, 0.9, 1) -- Blue for evade
+            title = (actionResult.ship == "player" and "YOU EVADED" or "ENEMY EVADED")
+            title = title .. " - EVADE SCORE: " .. actionResult.evadeScore
+        elseif actionResult.action == "repair" then
+            love.graphics.setColor(0.3, 0.9, 0.3, 1) -- Green for repair
+            title = (actionResult.ship == "player" and "YOU REPAIRED" or "ENEMY REPAIRED")
+            title = title .. " - HP RESTORED: " .. actionResult.repairAmount
+        end
+    end
+    
+    -- Display title centered at top of feedback panel
+    love.graphics.printf(title, sidebarWidth + 15, feedbackY + 10, screenWidth - (sidebarWidth * 2) - 30, "center")
+    
+    -- Skip dice display for failed actions
+    if actionResult.success == false then
+        -- No further content if it's just an error message
+        return
+    end
+    
+    -- Display dice rolled with visual highlights - dice that "count" will be raised
+    love.graphics.setColor(1, 1, 1, 1)
+    local diceX = sidebarWidth + 20
+    local diceY = feedbackY + 35  -- Centered vertically in the shorter panel
+    
+    -- Use the new highlighted dice display that shows which dice count
+    diceSystem:drawWithHighlight(actionResult.dice, diceX, diceY, 1.5)
+    
+    -- Display subtle outcome indicator text centered below dice
+    local panelWidth = screenWidth - (sidebarWidth * 2) - 20
+    local resultText = diceSystem:getResultText(actionResult.outcome)
+    love.graphics.setColor(diceSystem:getResultColor(actionResult.outcome))
+    love.graphics.setColor(1, 1, 1, 0.7)  -- More subtle text
+    love.graphics.printf(resultText, sidebarWidth + 10, diceY + 45, panelWidth - 10, "center")
+    
+    -- Draw modifiers if present
+    self:drawActionModifiers(actionResult.modifiers, screenWidth, sidebarWidth, diceY)
+end
+
+-- Draw the action modifiers
+function Combat:drawActionModifiers(modifiers, screenWidth, sidebarWidth, diceY)
+    -- If we have modifiers, display them on the right side
+    if modifiers and #modifiers > 0 then
+        local modX = screenWidth - sidebarWidth - 150
+        love.graphics.setColor(1, 1, 1, 0.9)
+        love.graphics.print("MODIFIERS:", modX, diceY + 5)
+        
+        for i, mod in ipairs(modifiers) do
+            -- Choose color based on modifier value
+            if mod.value > 0 then
+                love.graphics.setColor(0.2, 0.8, 0.2, 0.8) -- Green for positive
+            else
+                love.graphics.setColor(0.8, 0.2, 0.2, 0.8) -- Red for negative
+            end
+            
+            local sign = mod.value > 0 and "+" or ""
+            love.graphics.print(mod.description .. " " .. sign .. mod.value, modX, diceY + 5 + (i * 20))
+        end
+    end
+end
+
+-- Draw the action panel (buttons or movement controls)
+function Combat:drawActionPanel(battle, buttonsY, layout)
+    local screenWidth = layout.screenWidth
+    local CONTROLS_HEIGHT = Constants.UI.COMBAT.CONTROLS_HEIGHT
+    
+    -- Common panel for action buttons or movement controls
+    self:drawUIPanel(0, buttonsY, screenWidth, CONTROLS_HEIGHT)
+    
+    -- Different controls based on phase
+    if battle.turn == "player" then
+        if battle.phase == "action" then
+            self:drawActionButtons(battle, buttonsY, screenWidth, layout.sidebarWidth)
+        else
+            self:drawMovementControls(battle, buttonsY, screenWidth)
+        end
+    else
+        -- Enemy turn - show a "Waiting..." animation or indicator
+        love.graphics.setColor(0.7, 0.7, 0.7, 0.7)
+        love.graphics.printf("ENEMY TAKING ACTION...", 0, buttonsY + 15, screenWidth, "center")
+    end
+end
+
+-- Draw the action buttons
+function Combat:drawActionButtons(battle, buttonsY, screenWidth, sidebarWidth)
+    -- Center buttons in the available space
+    local buttonSpacing = 20
+    local buttonWidth = 160
+    local buttonHeight = 40
+    local buttonY = buttonsY + 5  -- Standard button Y position
+    local totalButtonsWidth = (3 * buttonWidth) + (2 * buttonSpacing) + 125 + buttonSpacing
+    local startX = (screenWidth - totalButtonsWidth) / 2
+    
+    -- Store button positions for consistent hitbox testing
+    self.actionButtons = {
+        fire = { x = startX, y = buttonY, width = buttonWidth, height = buttonHeight },
+        evade = { x = startX + buttonWidth + buttonSpacing, y = buttonY, width = buttonWidth, height = buttonHeight },
+        repair = { x = startX + (buttonWidth + buttonSpacing) * 2, y = buttonY, width = buttonWidth, height = buttonHeight },
+        endTurn = { x = startX + (buttonWidth + buttonSpacing) * 3, y = buttonY, width = 125, height = buttonHeight }
+    }
+    
+    -- Fire Cannons button
+    self:drawButton(
+        self.actionButtons.fire.x, 
+        self.actionButtons.fire.y, 
+        self.actionButtons.fire.width, 
+        self.actionButtons.fire.height, 
+        {0.8, 0.3, 0.3, 0.9}, "FIRE CANNONS", 
+        battle.playerShip.crewPoints >= self.actionCosts.fire
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.fire.x, 
+        self.actionButtons.fire.y, 
+        self.actionButtons.fire.width, 
+        self.actionButtons.fire.height
+    )
+    
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("(" .. self.actionCosts.fire .. " CP)", self.actionButtons.fire.x + 20, self.actionButtons.fire.y + 25, 0, 0.8, 0.8)
+    
+    -- Evade button
+    self:drawButton(
+        self.actionButtons.evade.x, 
+        self.actionButtons.evade.y, 
+        self.actionButtons.evade.width, 
+        self.actionButtons.evade.height,
+        {0.3, 0.3, 0.8, 0.9}, "EVADE", 
+        battle.playerShip.crewPoints >= self.actionCosts.evade
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.evade.x, 
+        self.actionButtons.evade.y, 
+        self.actionButtons.evade.width, 
+        self.actionButtons.evade.height
+    )
+    
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("(" .. self.actionCosts.evade .. " CP)", self.actionButtons.evade.x + 20, self.actionButtons.evade.y + 25, 0, 0.8, 0.8)
+    
+    -- Repair button
+    self:drawButton(
+        self.actionButtons.repair.x, 
+        self.actionButtons.repair.y, 
+        self.actionButtons.repair.width, 
+        self.actionButtons.repair.height,
+        {0.3, 0.8, 0.3, 0.9}, "REPAIR", 
+        battle.playerShip.crewPoints >= self.actionCosts.repair
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.repair.x, 
+        self.actionButtons.repair.y, 
+        self.actionButtons.repair.width, 
+        self.actionButtons.repair.height
+    )
+    
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("(" .. self.actionCosts.repair .. " CP)", self.actionButtons.repair.x + 20, self.actionButtons.repair.y + 25, 0, 0.8, 0.8)
+    
+    -- End Turn button
+    self:drawButton(
+        self.actionButtons.endTurn.x, 
+        self.actionButtons.endTurn.y, 
+        self.actionButtons.endTurn.width, 
+        self.actionButtons.endTurn.height,
+        {0.7, 0.7, 0.7, 0.9}, "END TURN", true
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.endTurn.x, 
+        self.actionButtons.endTurn.y, 
+        self.actionButtons.endTurn.width, 
+        self.actionButtons.endTurn.height
+    )
+end
+
+-- Draw the movement controls
+function Combat:drawMovementControls(battle, buttonsY, screenWidth)
+    -- Position info in left side
+    love.graphics.setColor(1, 1, 1, 0.8)
+    local posText = "POSITION: [" .. battle.playerShip.position[1] .. "," .. battle.playerShip.position[2] .. "]"
+    love.graphics.print(posText, 50, buttonsY + 15)
+    
+    -- Direction hint if ship is selected
+    if self.selectedHex then
+        love.graphics.setColor(0.3, 0.8, 0.9, 0.9)
+        local dirText = "SELECT A BLUE HEX TO MOVE"
+        love.graphics.print(dirText, 300, buttonsY + 15)
+    end
+    
+    -- End Move/To Action button (right side)
+    local moveButtonX = screenWidth - 175
+    local moveButtonY = buttonsY + 5
+    local moveButtonWidth = 125
+    local moveButtonHeight = 40
+    
+    -- Store button position for consistent hitbox testing
+    self.moveActionButton = {
+        x = moveButtonX,
+        y = moveButtonY,
+        width = moveButtonWidth,
+        height = moveButtonHeight
+    }
+    
+    if battle.playerShip.movesRemaining <= 0 then
+        self:drawButton(moveButtonX, moveButtonY, moveButtonWidth, moveButtonHeight, 
+                        {0.8, 0.7, 0.2, 0.9}, "END MOVE", true)
+    else
+        self:drawButton(moveButtonX, moveButtonY, moveButtonWidth, moveButtonHeight, 
+                        {0.7, 0.7, 0.2, 0.9}, "TO ACTION", true)
+    end
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(moveButtonX, moveButtonY, moveButtonWidth, moveButtonHeight)
+end
+
+-- Draw the instructions panel
+function Combat:drawInstructionsPanel(battle, buttonsY, layout)
+    local screenWidth = layout.screenWidth
+    local CONTROLS_HEIGHT = Constants.UI.COMBAT.CONTROLS_HEIGHT
+    local INSTRUCTIONS_HEIGHT = Constants.UI.COMBAT.INSTRUCTIONS_HEIGHT
+    
+    -- Position it below the action buttons panel
+    self:drawUIPanel(0, buttonsY + CONTROLS_HEIGHT, screenWidth, INSTRUCTIONS_HEIGHT)
+    
+    -- Draw instructions text
+    love.graphics.setColor(1, 1, 1, 0.9)
+    local instructions = ""
+    if battle.turn == "player" then
+        if battle.phase == "movement" then
+            instructions = "MOVEMENT PHASE: Click your ship, then click a blue hex to move"
+        elseif battle.phase == "action" then
+            instructions = "ACTION PHASE: Click a button to perform an action"
+        end
+    else
+        instructions = "ENEMY TURN: Please wait..."
+    end
+    love.graphics.printf(instructions, 20, buttonsY + CONTROLS_HEIGHT + 8, screenWidth - 40, "center")
+end
+
+-- Helper function to draw a UI panel with background
+function Combat:drawUIPanel(x, y, width, height, r, g, b, a)
+    local color
+    -- Use provided color values or constants if color arguments are nil
+    if r == nil then
+        color = Constants.COLORS.UI_PANEL
+    else
+        color = {r, g, b, a}
+    end
+    
+    -- Draw panel background
+    love.graphics.setColor(color)
+    love.graphics.rectangle("fill", x, y, width, height, 5, 5)
+    
+    -- Draw panel border
+    love.graphics.setColor(Constants.COLORS.UI_BORDER)
+    love.graphics.rectangle("line", x, y, width, height, 5, 5)
+end
+
+-- Helper function to draw a progress bar
+function Combat:drawProgressBar(x, y, width, height, fillPercent, fillColor, emptyColor)
+    -- Clamp fill percent between 0 and 1
+    fillPercent = math.max(0, math.min(1, fillPercent))
+    
+    -- Draw background (empty part)
+    love.graphics.setColor(emptyColor[1], emptyColor[2], emptyColor[3], emptyColor[4] or 1)
+    love.graphics.rectangle("fill", x, y, width, height, 3, 3)
+    
+    -- Draw filled part
+    love.graphics.setColor(fillColor[1], fillColor[2], fillColor[3], fillColor[4] or 1)
+    love.graphics.rectangle("fill", x, y, width * fillPercent, height, 3, 3)
+    
+    -- Draw border
+    love.graphics.setColor(1, 1, 1, 0.5)
+    love.graphics.rectangle("line", x, y, width, height, 3, 3)
+    
+    -- Draw notches for visual scale reference (every 25%)
+    love.graphics.setColor(1, 1, 1, 0.3)
+    for i = 1, 3 do
+        local notchX = x + (width * (i / 4))
+        love.graphics.line(notchX, y, notchX, y + height)
+    end
+    
+    -- Add color indicator based on value (red for low, yellow for medium, green for good)
+    if fillPercent < 0.25 then
+        -- Draw critical indicator for low health
+        if fillPercent < 0.3 and emptyColor[1] > 0.5 then -- Only for health bars
+            love.graphics.setColor(1, 0, 0, math.abs(math.sin(love.timer.getTime() * 4)) * 0.8)
+            love.graphics.rectangle("fill", x, y, width * fillPercent, height, 3, 3)
+        end
+    end
+end
+
+-- Helper function to draw a button
+function Combat:drawButton(x, y, width, height, color, text, enabled)
+    -- Darken the button if disabled
+    local buttonColor = {color[1], color[2], color[3], color[4] or 1}
+    if not enabled then
+        buttonColor[1] = buttonColor[1] * 0.4
+        buttonColor[2] = buttonColor[2] * 0.4
+        buttonColor[3] = buttonColor[3] * 0.4
+    end
+    
+    -- Draw button shadow for depth
+    love.graphics.setColor(0, 0, 0, 0.3)
+    love.graphics.rectangle("fill", x + 2, y + 2, width, height, 5, 5)
+    
+    -- Draw button background with gradient effect
+    local gradientTop = {
+        buttonColor[1] * 1.2,
+        buttonColor[2] * 1.2,
+        buttonColor[3] * 1.2,
+        buttonColor[4]
+    }
+    
+    -- Top half with lighter color
+    love.graphics.setColor(gradientTop)
+    love.graphics.rectangle("fill", x, y, width, height/2, 5, 5)
+    
+    -- Bottom half with original color
+    love.graphics.setColor(buttonColor)
+    love.graphics.rectangle("fill", x, y + height/2, width, height/2, 5, 5)
+    
+    -- Draw button border
+    if enabled then
+        love.graphics.setColor(1, 1, 1, 0.8)
+    else
+        love.graphics.setColor(0.5, 0.5, 0.5, 0.5)
+    end
+    love.graphics.rectangle("line", x, y, width, height, 5, 5)
+    
+    -- Draw button text with slight shadow for better readability
+    if enabled then
+        -- Text shadow
+        love.graphics.setColor(0, 0, 0, 0.5)
+        local textX = x + (width / 2) - (love.graphics.getFont():getWidth(text) / 2) + 1
+        local textY = y + (height / 2) - (love.graphics.getFont():getHeight() / 2) + 1
+        love.graphics.print(text, textX, textY)
+        
+        -- Actual text
+        love.graphics.setColor(1, 1, 1, 1)
+    else
+        love.graphics.setColor(0.7, 0.7, 0.7, 0.7)
+    end
+    
+    -- Center text on button
+    local textX = x + (width / 2) - (love.graphics.getFont():getWidth(text) / 2)
+    local textY = y + (height / 2) - (love.graphics.getFont():getHeight() / 2)
+    love.graphics.print(text, textX, textY)
+    
+    -- Add subtle highlight effect on the top edge for 3D effect
+    if enabled then
+        love.graphics.setColor(1, 1, 1, 0.3)
+        love.graphics.line(x + 2, y + 2, x + width - 2, y + 2)
+    end
+end
+
+-- Handle mouse movement
+function Combat:mousemoved(x, y, gameState)
+    if not gameState.combat then return end
+    
+    -- Update hovered hex
+    self.hoveredHex = self:getHexFromScreen(x, y)
+end
+
+-- Helper function to check if a point is inside a button
+function Combat:isPointInButton(x, y, buttonX, buttonY, buttonWidth, buttonHeight)
+    -- Simple rectangular hitbox check
+    return x >= buttonX and x <= buttonX + buttonWidth and
+           y >= buttonY and y <= buttonY + buttonHeight
+end
+
+-- Debug function to draw hitboxes (only used in debug mode)
+function Combat:drawButtonHitbox(buttonX, buttonY, buttonWidth, buttonHeight)
+    if self.showDebugHitboxes then
+        love.graphics.setColor(1, 0, 0, 0.3)
+        love.graphics.rectangle("line", buttonX, buttonY, buttonWidth, buttonHeight)
+        -- Draw a small dot at the button center for reference
+        love.graphics.setColor(1, 0, 0, 0.8)
+        love.graphics.circle("fill", buttonX + buttonWidth/2, buttonY + buttonHeight/2, 2)
+    end
+end
+
+-- Handle mouse clicks
+function Combat:mousepressed(x, y, button, gameState)
+    if not gameState.combat then return end
+    
+    -- Only handle left clicks
+    if button ~= 1 then return end
+    
+    local battle = gameState.combat
+    
+    -- Use layout constants from draw function
+    local layout = self.layoutConstants
+    if not layout then return end
+    
+    -- Calculate the y-position of the buttons panel
+    local buttonsY = self:calculateButtonsY(battle, layout)
+    
+    -- First check if clicking on UI buttons
+    if battle.turn == "player" then
+        -- Try to handle button clicks based on the phase
+        if self:handleButtonClick(x, y, battle, buttonsY, gameState) then
+            return -- Button was clicked and handled
+        end
+    end
+    
+    -- If not clicking buttons, check for hex grid interactions
+    -- (but only if click is inside the grid area)
+    if self:isPointInGridArea(x, y, layout) then
+        if battle.turn == "player" and battle.phase == "movement" then
+            self:handleHexClick(x, y, battle, gameState)
+        end
+    end
+end
+
+-- Calculate the Y position for the buttons panel
+function Combat:calculateButtonsY(battle, layout)
+    local buttonsY = 0
+    
+    if battle.actionResult then
+        -- Below the feedback panel
+        buttonsY = layout.gridBottom + Constants.UI.COMBAT.FEEDBACK_HEIGHT + 10
+    else
+        -- At the bottom of the grid area
+        buttonsY = layout.gridBottom + 5
+    end
+    
+    return buttonsY
+end
+
+-- Handle button clicks in the UI
+function Combat:handleButtonClick(x, y, battle, buttonsY, gameState)
+    -- Phase transition button (movement -> action) during movement phase
+    if battle.phase == "movement" then
+        if self:handleMovementPhaseButton(x, y, battle) then
+            return true
+        end
+    elseif battle.phase == "action" then
+        if self:handleActionPhaseButtons(x, y, battle, gameState) then
+            return true
+        end
+    end
+    
+    return false -- No button was clicked
+end
+
+-- Handle movement phase button clicks
+function Combat:handleMovementPhaseButton(x, y, battle)
+    if self.moveActionButton and 
+       self:isPointInButton(x, y, self.moveActionButton.x, self.moveActionButton.y, 
+                         self.moveActionButton.width, self.moveActionButton.height) then
+        -- End movement phase and start action phase
+        battle.phase = "action"
+        return true
+    end
+    
+    return false
+end
+
+-- Handle action phase button clicks
+function Combat:handleActionPhaseButtons(x, y, battle, gameState)
+    -- Check for button clicks using stored button positions
+    if not self.actionButtons then return false end
+    
+    -- Fire Cannons button
+    if self:isPointInButton(x, y, self.actionButtons.fire.x, self.actionButtons.fire.y, 
+                          self.actionButtons.fire.width, self.actionButtons.fire.height) and 
+       battle.playerShip.crewPoints >= self.actionCosts.fire then
+        battle.actionResult = self:fireCannons(gameState)
+        battle.playerShip.hasActed = true
+        return true
+    end
+    
+    -- Evade button
+    if self:isPointInButton(x, y, self.actionButtons.evade.x, self.actionButtons.evade.y, 
+                          self.actionButtons.evade.width, self.actionButtons.evade.height) and 
+       battle.playerShip.crewPoints >= self.actionCosts.evade then
+        battle.actionResult = self:evade(gameState)
+        battle.playerShip.hasActed = true
+        return true
+    end
+    
+    -- Repair button
+    if self:isPointInButton(x, y, self.actionButtons.repair.x, self.actionButtons.repair.y, 
+                          self.actionButtons.repair.width, self.actionButtons.repair.height) and 
+       battle.playerShip.crewPoints >= self.actionCosts.repair then
+        battle.actionResult = self:repair(gameState)
+        battle.playerShip.hasActed = true
+        return true
+    end
+    
+    -- End Turn button
+    if self:isPointInButton(x, y, self.actionButtons.endTurn.x, self.actionButtons.endTurn.y, 
+                          self.actionButtons.endTurn.width, self.actionButtons.endTurn.height) then
+        self:endPlayerTurn(gameState)
+        return true
+    end
+    
+    return false
+end
+
+-- Check if a point is within the grid area
+function Combat:isPointInGridArea(x, y, layout)
+    local centerAreaLeft = layout.sidebarWidth
+    local centerAreaRight = layout.screenWidth - layout.sidebarWidth
+    
+    -- Return true if point is inside the grid area
+    return x >= centerAreaLeft and x <= centerAreaRight and y >= layout.gridTop and y <= layout.gridBottom
+end
+
+-- Handle hex grid clicks during the movement phase
+function Combat:handleHexClick(x, y, battle, gameState)
+    local clickedHex = self:getHexFromScreen(x, y)
+    if not clickedHex then return end
+    
+    local q, r = clickedHex[1], clickedHex[2]
+    
+    -- Check bounds to make sure we're not out of the grid
+    if q < 0 or q >= self.GRID_SIZE or r < 0 or r >= self.GRID_SIZE then
+        return
+    end
+    
+    -- If the player's ship is clicked, select it
+    if battle.grid[q][r].isPlayerShip then
+        self:selectPlayerShip(clickedHex, battle, gameState)
+    -- If a valid move hex is clicked, move the ship there
+    elseif self.selectedHex and self:isValidMove(q, r) then
+        self:movePlayerShip(q, r, battle, gameState)
+    end
+end
+
+-- Select the player's ship for movement
+function Combat:selectPlayerShip(clickedHex, battle, gameState)
+    self.selectedHex = clickedHex
+    -- Calculate valid moves from this position
+    self.validMoves = self:calculateValidMoves(battle, battle.playerShip)
+    
+    -- Debug
+    if gameState.settings.debug then
+        local q, r = clickedHex[1], clickedHex[2]
+        print("Selected player ship at " .. q .. "," .. r .. 
+              " with " .. battle.playerShip.movesRemaining .. " moves remaining")
+    end
+end
+
+-- Move the player's ship to a new position
+function Combat:movePlayerShip(q, r, battle, gameState)
+    -- Move the ship to the new position
+    self:moveShip(battle, battle.playerShip, q, r)
+    
+    -- Recalculate valid moves or clear them if no moves left
+    if battle.playerShip.movesRemaining > 0 then
+        self.validMoves = self:calculateValidMoves(battle, battle.playerShip)
+    else
+        self.validMoves = {}
+        self.selectedHex = nil
+        
+        -- If out of moves, auto-transition to action phase
+        battle.phase = "action"
+    end
+    
+    -- Debug
+    if gameState.settings.debug then
+        print("Moved player ship to " .. q .. "," .. r .. 
+              " with " .. battle.playerShip.movesRemaining .. " moves remaining")
+    end
+end
+
+-- End player turn and start enemy turn
+function Combat:endPlayerTurn(gameState)
+    local battle = gameState.combat
+    
+    -- Reset player ship for next turn
+    battle.playerShip.hasActed = false
+    battle.playerShip.movesRemaining = shipUtils.getBaseSpeed(battle.playerShip.class)
+    battle.playerShip.crewPoints = battle.playerShip.maxCrewPoints
+    
+    -- Switch to enemy turn
+    battle.turn = "enemy"
+    battle.phase = "movement"
+    
+    -- Process enemy turn (simple AI)
+    self:processEnemyTurn(gameState)
+end
+
+-- Process enemy turn with simple AI
+function Combat:processEnemyTurn(gameState)
+    local battle = gameState.combat
+    
+    -- Movement phase - enemy moves based on tactical situation
+    self:processEnemyMovement(gameState)
+    
+    -- Action phase - enemy chooses an action based on health
+    battle.phase = "action"
+    self:processEnemyAction(gameState)
+    
+    -- End the enemy turn and prepare for player turn
+    self:finalizeEnemyTurn(battle)
+end
+
+-- Finalize the enemy turn and prepare for player turn
+function Combat:finalizeEnemyTurn(battle)
+    -- Reset enemy ship for next turn
+    battle.enemyShip.hasActed = false
+    battle.enemyShip.movesRemaining = shipUtils.getBaseSpeed(battle.enemyShip.class)
+    battle.enemyShip.crewPoints = battle.enemyShip.maxCrewPoints
+    
+    -- Increment turn counter
+    battle.turnCount = battle.turnCount + 1
+    
+    -- Reset for player turn
+    battle.turn = "player"
+    battle.phase = "movement"
+end
+
+-- Process enemy movement
+function Combat:processEnemyMovement(gameState)
+    local battle = gameState.combat
+    local enemyShip = battle.enemyShip
+    local playerShip = battle.playerShip
+    
+    -- Calculate initial state
+    local eq, er = enemyShip.position[1], enemyShip.position[2]
+    local pq, pr = playerShip.position[1], playerShip.position[2]
+    local distance = self:hexDistance(eq, er, pq, pr)
+    local movesRemaining = enemyShip.movesRemaining
+    
+    -- Calculate health percentage (affects tactical decisions)
+    local maxHealth = shipUtils.getMaxHP(enemyShip.class)
+    local healthPercent = enemyShip.durability / maxHealth
+    
+    -- Keep moving until we run out of moves or valid moves
+    while movesRemaining > 0 do
+        -- Get all possible moves
+        local validMoves = self:calculateValidMoves(battle, enemyShip)
+        if #validMoves == 0 then break end
+        
+        -- Find the best move
+        local bestMove = self:findBestEnemyMove(validMoves, healthPercent, playerShip)
+        
+        -- Execute the chosen move
+        if bestMove then
+            self:moveShip(battle, enemyShip, bestMove[1], bestMove[2])
+            movesRemaining = enemyShip.movesRemaining
+        else
+            break
+        end
+    end
+end
+
+-- Find the best move for the enemy ship based on tactical situation
+function Combat:findBestEnemyMove(validMoves, healthPercent, playerShip)
+    local bestMove = nil
+    local bestScore = -1000
+    local pq, pr = playerShip.position[1], playerShip.position[2]
+    
+    for _, move in ipairs(validMoves) do
+        local moveQ, moveR = move[1], move[2]
+        local newDist = self:hexDistance(moveQ, moveR, pq, pr)
+        
+        -- Calculate score based on enemy's health and strategy
+        local score = self:calculateMoveScore(newDist, healthPercent)
+        
+        -- Take the highest-scoring move
+        if score > bestScore then
+            bestScore = score
+            bestMove = move
+        end
+    end
+    
+    return bestMove
+end
+
+-- Calculate a score for a potential move based on tactical situation
+function Combat:calculateMoveScore(distance, healthPercent)
+    local score = 0
+    
+    -- Different strategies based on health
+    if healthPercent > 0.7 then
+        -- Aggressive when healthy - get closer to attack
+        score = -distance  -- Negative distance = prefer closer
+    elseif healthPercent > 0.3 then
+        -- Cautious when moderately damaged - maintain medium distance
+        score = -(math.abs(distance - 3))  -- Prefer distance of about 3 hexes
+    else
+        -- Defensive when critically damaged - flee
+        score = distance  -- Prefer farther
+    end
+    
+    -- Add slight randomization to avoid predictable behavior
+    score = score + math.random() * 0.5
+    
+    return score
+end
+
+-- Process enemy action based on health
+function Combat:processEnemyAction(gameState)
+    local battle = gameState.combat
+    local enemyShip = battle.enemyShip
+    
+    -- Calculate health percentage
+    local maxHealth = shipUtils.getMaxHP(enemyShip.class)
+    local healthPercent = enemyShip.durability / maxHealth
+    
+    -- Choose and execute an action based on health level
+    battle.actionResult = self:chooseEnemyAction(gameState, healthPercent)
+    
+    -- Short delay to show the action result (would be implemented better with a timer)
+    love.timer.sleep(0.5)
+end
+
+-- Choose an appropriate action for the enemy based on health
+function Combat:chooseEnemyAction(gameState, healthPercent)
+    -- Different actions based on health threshold:
+    if healthPercent < 0.3 then
+        -- Critically damaged - try to repair
+        return self:repair(gameState)
+    elseif healthPercent < 0.7 then
+        -- Moderately damaged - try to evade
+        return self:evade(gameState)
+    else
+        -- Healthy - attack!
+        return self:fireCannons(gameState)
+    end
+end
+
+-- Start a naval battle
+function Combat:startBattle(gameState, enemyShipClass)
+    -- Initialize a new battle
+    self:initBattle(gameState, enemyShipClass)
+    
+    -- Set game state to combat mode
+    gameState.settings.combatMode = true
+    
+    return true
+end
+
+-- Fire cannons action (Ticket 3-2)
+function Combat:fireCannons(gameState, target)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:fireCannons")
+    assert(gameState.combat, "No active battle found in gameState")
+    
+    local battle = gameState.combat
+    local attacker = battle.turn == "player" and battle.playerShip or battle.enemyShip
+    local defender = battle.turn == "player" and battle.enemyShip or battle.playerShip
+    
+    -- Validate battle state
+    assert(attacker, "No attacker ship found in battle")
+    assert(defender, "No defender ship found in battle")
+    
+    -- Check if enough crew points are available
+    if attacker.crewPoints < self.actionCosts.fire then
+        return {
+            action = "fire",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.fire .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    attacker.crewPoints = attacker.crewPoints - self.actionCosts.fire
+    
+    -- Calculate base dice based on firepower (cannons)
+    local baseDice = shipUtils.getBaseFirepowerDice(attacker.class)
+    
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Check for point blank range (adjacent hex)
+    local aq, ar = attacker.position[1], attacker.position[2]
+    local dq, dr = defender.position[1], defender.position[2]
+    local dist = self:hexDistance(aq, ar, dq, dr)
+    
+    if dist == 1 then
+        -- Point blank range gives +1 die
+        table.insert(modifiers, diceSystem:createModifier("Point Blank Range", 1, true))
+    end
+    
+    -- Check for Gunner in crew (adds skill as bonus dice)
+    if battle.turn == "player" then
+        -- Check player's crew for Gunner
+        for _, member in ipairs(gameState.crew.members) do
+            if member.role == "Gunner" then
+                -- Add Gunner's skill level as a modifier
+                local gunnerBonus = member.skill * Constants.GAME.GUNNER_SKILL_MULTIPLIER
+                table.insert(modifiers, diceSystem:createModifier("Gunner: " .. member.name, gunnerBonus, true))
+                
+                if gameState.settings.debug then
+                    print("Gunner modifier: +" .. gunnerBonus .. " dice from " .. member.name)
+                end
+                
+                break  -- Only apply the first Gunner's bonus for now
+            end
+        end
+    end
+    
+    -- Apply defender's evade score as a negative modifier
+    if defender.evadeScore > 0 then
+        table.insert(modifiers, diceSystem:createModifier("Target Evading", -defender.evadeScore, true))
+        -- Reset defender's evade score after this attack
+        defender.evadeScore = 0
+    end
+    
+    -- Add any persistent modifiers from attacker
+    for _, mod in ipairs(attacker.modifiers) do
+        if mod.category == "attack" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for attack with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
+    
+    -- Calculate damage based on outcome level
+    local damage = 0
+    if outcome.result == "critical" then
+        damage = Constants.COMBAT.DAMAGE_CRITICAL  -- Critical hit damage
+    elseif outcome.result == "success" then
+        damage = Constants.COMBAT.DAMAGE_SUCCESS  -- Success damage
+    elseif outcome.result == "partial" then
+        damage = Constants.COMBAT.DAMAGE_PARTIAL  -- Partial success damage
+    end
+    
+    -- Apply damage to target
+    if battle.turn == "player" then
+        -- Player attacks enemy
+        battle.enemyShip.durability = math.max(0, (battle.enemyShip.durability or 10) - damage)
+        
+        -- Check if enemy is destroyed
+        if battle.enemyShip.durability <= 0 then
+            -- Enemy ship is sunk - player wins
+            self:endBattle(gameState, "victory")
+            return true
+        end
+    else
+        -- Enemy attacks player
+        gameState.ship.durability = math.max(0, gameState.ship.durability - damage)
+        
+        -- Check if player is destroyed
+        if gameState.ship.durability <= 0 then
+            -- Player ship is sunk - player loses
+            self:endBattle(gameState, "defeat")
+            return true
+        end
+    end
+    
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(attacker)
+    
+    -- Return result for UI display
+    return {
+        action = "fire",
+        dice = diceResults,
+        outcome = outcome,
+        rollInfo = rollInfo,
+        damage = damage,
+        attacker = battle.turn,
+        targetDurability = battle.turn == "player" and battle.enemyShip.durability or gameState.ship.durability,
+        modifiers = modifiers
+    }
+end
+
+-- Clean up temporary modifiers
+function Combat:cleanupTemporaryModifiers(ship)
+    -- Filter out temporary modifiers
+    local persistentModifiers = {}
+    for _, mod in ipairs(ship.modifiers) do
+        if not mod.temporary then
+            table.insert(persistentModifiers, mod)
+        end
+    end
+    
+    -- Replace with only persistent modifiers
+    ship.modifiers = persistentModifiers
+end
+
+-- Evade action (Ticket 3-2)
+function Combat:evade(gameState)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:evade")
+    assert(gameState.combat, "No active battle found in gameState")
+    
+    local battle = gameState.combat
+    local ship = battle.turn == "player" and battle.playerShip or battle.enemyShip
+    
+    -- Validate battle state
+    assert(ship, "No ship found for current turn")
+    
+    -- Check if enough crew points are available
+    if ship.crewPoints < self.actionCosts.evade then
+        return {
+            action = "evade",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.evade .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    ship.crewPoints = ship.crewPoints - self.actionCosts.evade
+    
+    -- Calculate base dice based on ship class (speed influences evasion)
+    local baseDice = shipUtils.getBaseSpeed(ship.class)
+    
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Add any persistent modifiers from ship
+    for _, mod in ipairs(ship.modifiers) do
+        if mod.category == "evade" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for evasion with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
+    
+    -- Set evade score based on outcome level
+    local evadeScore = outcome.level  -- 0=failure, 1=partial, 2=success, 3=critical
+    
+    if battle.turn == "player" then
+        -- Player evades
+        battle.playerShip.evadeScore = evadeScore
+    else
+        -- Enemy evades
+        battle.enemyShip.evadeScore = evadeScore
+    end
+    
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(ship)
+    
+    -- Return result for UI display
+    return {
+        action = "evade",
+        dice = diceResults,
+        outcome = outcome,
+        rollInfo = rollInfo,
+        evadeScore = evadeScore,
+        ship = battle.turn,
+        modifiers = modifiers
+    }
+end
+
+-- Repair action (Ticket 3-2)
+function Combat:repair(gameState)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:repair")
+    assert(gameState.combat, "No active battle found in gameState")
+    
+    local battle = gameState.combat
+    local ship = battle.turn == "player" and battle.playerShip or battle.enemyShip
+    
+    -- Validate battle state
+    assert(ship, "No ship found for current turn")
+    
+    -- Check if enough crew points are available
+    if ship.crewPoints < self.actionCosts.repair then
+        return {
+            action = "repair",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.repair .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    ship.crewPoints = ship.crewPoints - self.actionCosts.repair
+    
+    -- Calculate base dice - always 1 for base repair
+    local baseDice = 1
+    
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Check for surgeon in crew (adds dice)
+    if battle.turn == "player" then
+        -- Check player's crew for surgeon
+        for _, member in ipairs(gameState.crew.members) do
+            if member.role == "Surgeon" then
+                -- Add surgeon's skill level as a modifier
+                table.insert(modifiers, diceSystem:createModifier("Surgeon: " .. member.name, member.skill, true))
+                break
+            end
+        end
+    end
+    
+    -- Add any persistent modifiers from ship
+    for _, mod in ipairs(ship.modifiers) do
+        if mod.category == "repair" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for repair with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
+    
+    -- Calculate repair amount based on outcome level
+    local repairAmount = 0
+    if outcome.result == "critical" then
+        repairAmount = Constants.COMBAT.REPAIR_CRITICAL  -- Critical repair
+    elseif outcome.result == "success" then
+        repairAmount = Constants.COMBAT.REPAIR_SUCCESS  -- Success repair
+    elseif outcome.result == "partial" then
+        repairAmount = Constants.COMBAT.REPAIR_PARTIAL  -- Partial success repair
+    end
+    
+    -- Apply repairs
+    if battle.turn == "player" then
+        -- Player repairs their ship
+        local maxDurability = shipUtils.getMaxHP(gameState.ship.class)
+        gameState.ship.durability = math.min(gameState.ship.durability + repairAmount, maxDurability)
+    else
+        -- Enemy repairs their ship
+        local maxDurability = shipUtils.getMaxHP(ship.class)
+        battle.enemyShip.durability = math.min((battle.enemyShip.durability or 10) + repairAmount, maxDurability)
+    end
+    
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(ship)
+    
+    -- Return result for UI display
+    return {
+        action = "repair",
+        dice = diceResults,
+        outcome = outcome,
+        rollInfo = rollInfo,
+        repairAmount = repairAmount,
+        ship = battle.turn,
+        currentDurability = battle.turn == "player" and gameState.ship.durability or battle.enemyShip.durability,
+        modifiers = modifiers
+    }
+end
+
+-- Dice mechanics integration methods
+
+-- Initialize the dice system
+function Combat:initDiceSystem()
+    diceSystem:init()
+end
+
+-- Roll dice for combat actions (using the dice module)
+function Combat:rollDice(numDice)
+    return diceSystem:roll(numDice)
+end
+
+-- Interpret dice results (using the dice module)
+function Combat:interpretDiceResults(diceResults)
+    return diceSystem:interpret(diceResults)
+end
+
+-- End a naval battle
+function Combat:endBattle(gameState, result)
+    -- Process battle results
+    if result then
+        if result == "victory" then
+            -- Player won the battle
+            print("Victory! Enemy ship destroyed.")
+            -- Would add rewards here in later sprints
+        elseif result == "defeat" then
+            -- Player lost the battle
+            print("Defeat! Your ship was destroyed.")
+            -- Would add consequences here in later sprints
+        elseif result == "retreat" then
+            -- Player retreated from battle
+            print("You retreat from the battle.")
+        end
+    end
+    
+    -- Clean up combat state
+    gameState.combat = nil
+    
+    -- Exit combat mode
+    gameState.settings.combatMode = false
+    
+    return true
+end
+
+return Combat```
 
 ## src/conf.lua
 ```lua
@@ -11,7 +2313,7 @@ function love.conf(t)
     t.version = "11.4"                -- The LÖVE version this game was made for
     t.window.width = 800              -- Game window width
     t.window.height = 600             -- Game window height
-    t.window.resizable = false        -- Let the window be user-resizable
+    t.window.resizable = true         -- Allow window to be resized with letterboxing/pillarboxing
     t.console = true                  -- Enable console for debug output
     
     -- For development
@@ -22,10 +2324,611 @@ function love.conf(t)
     t.modules.physics = false         -- No need for physics module for map navigation
 end```
 
+## src/constants.lua
+```lua
+-- Game Constants
+-- Centralized definitions of commonly used values
+
+local Constants = {
+    -- ============ UI LAYOUT CONSTANTS ============
+    UI = {
+        -- General Screen
+        SCREEN_WIDTH = 800,
+        SCREEN_HEIGHT = 600,
+        
+        -- Combat Layout
+        COMBAT = {
+            TOP_BAR_HEIGHT = 30,
+            BOTTOM_BAR_HEIGHT = 80,
+            SIDEBAR_WIDTH = 140,
+            FEEDBACK_HEIGHT = 70,
+            CONTROLS_HEIGHT = 50,
+            INSTRUCTIONS_HEIGHT = 30,
+            BUTTON_WIDTH = 160,
+            BUTTON_HEIGHT = 40,
+            BUTTON_SPACING = 20,
+            HEX_RADIUS = 25
+        }
+    },
+    
+    -- ============ COLORS ============
+    COLORS = {
+        -- General UI Colors
+        UI_BACKGROUND = {0.08, 0.1, 0.15, 1},  -- Very dark blue/black
+        UI_PANEL = {0.15, 0.15, 0.25, 0.9},    -- Translucent dark blue
+        UI_BORDER = {0.3, 0.3, 0.5, 0.8},      -- Light border
+        UI_TEXT = {1, 1, 1, 0.8},              -- Soft white text
+        
+        -- Ship and Entity Colors
+        PLAYER_SHIP = {0.2, 0.8, 0.2, 1},      -- Green for player
+        ENEMY_SHIP = {0.8, 0.2, 0.2, 1},       -- Red for enemy
+        HOVER = {0.8, 0.8, 0.2, 0.6},          -- Yellow for hover
+        SELECTED = {0.2, 0.8, 0.8, 0.6},       -- Cyan for selected
+        
+        -- Action Button Colors
+        BUTTON_FIRE = {0.8, 0.3, 0.3, 0.9},    -- Red for fire actions
+        BUTTON_EVADE = {0.3, 0.3, 0.8, 0.9},   -- Blue for evade actions
+        BUTTON_REPAIR = {0.3, 0.8, 0.3, 0.9},  -- Green for repair actions
+        BUTTON_NEUTRAL = {0.7, 0.7, 0.7, 0.9}, -- Gray for neutral actions
+        
+        -- Resource Colors
+        GOLD = {0.9, 0.8, 0.2, 1},             -- Gold color
+        HEALTH = {0.2, 0.8, 0.2, 1},           -- Health green
+        DAMAGE = {0.8, 0.2, 0.2, 1},           -- Damage red
+        
+        -- Sea and Map
+        SEA = {0.1, 0.2, 0.4, 1},              -- Dark blue water
+        SEA_BORDER = {0.2, 0.4, 0.6, 0.8},     -- Lighter blue border
+        VALID_MOVE = {0.5, 0.7, 0.9, 0.6},     -- Light blue for valid moves
+        EMPTY_WATER = {0.3, 0.5, 0.7, 0.4}     -- Blue for empty water
+    },
+    
+    -- ============ COMBAT CONSTANTS ============
+    COMBAT = {
+        -- Grid Configuration
+        GRID_SIZE = 10,                         -- 10x10 grid
+        
+        -- Action Costs
+        CP_COST_FIRE = 1,                       -- Fire cannons cost 1 CP
+        CP_COST_EVADE = 1,                      -- Evade costs 1 CP
+        CP_COST_REPAIR = 2,                     -- Repair costs 2 CP
+        
+        -- Damage Values
+        DAMAGE_CRITICAL = 3,                    -- Critical hit damage
+        DAMAGE_SUCCESS = 2,                     -- Success damage
+        DAMAGE_PARTIAL = 1,                     -- Partial success damage
+        
+        -- Repair Values
+        REPAIR_CRITICAL = 15,                   -- Critical repair amount
+        REPAIR_SUCCESS = 10,                    -- Success repair amount
+        REPAIR_PARTIAL = 5                      -- Partial success repair amount
+    },
+    
+    -- ============ DICE CONSTANTS ============
+    DICE = {
+        SUCCESS = 6,                            -- Success on 6
+        PARTIAL_MIN = 4,                        -- Partial success on 4-5
+        PARTIAL_MAX = 5,                        -- Partial success on 4-5
+        FAILURE_MAX = 3,                        -- Failure on 1-3
+        
+        -- Outcome Levels
+        OUTCOME_CRITICAL = 3,                   -- Level for critical success
+        OUTCOME_SUCCESS = 2,                    -- Level for success
+        OUTCOME_PARTIAL = 1,                    -- Level for partial success
+        OUTCOME_FAILURE = 0                     -- Level for failure
+    },
+    
+    -- ============ CREW ROLES ============
+    ROLES = {
+        NAVIGATOR = "Navigator",
+        GUNNER = "Gunner",
+        SURGEON = "Surgeon"
+    },
+    
+    -- ============ GAME SETTINGS ============
+    GAME = {
+        -- Default Resources
+        DEFAULT_GOLD = 50,
+        DEFAULT_RUM = 0,
+        DEFAULT_TIMBER = 0,
+        DEFAULT_GUNPOWDER = 0,
+        
+        -- Default Crew Values
+        DEFAULT_MORALE = 5,                     -- Default crew morale (1-10)
+        
+        -- Time/Game Progress
+        TOTAL_WEEKS = 72,                       -- Total game duration
+        EARTHQUAKE_MIN_WEEK = 60,               -- Earliest earthquake week
+        EARTHQUAKE_MAX_WEEK = 72,               -- Latest earthquake week
+        
+        -- Default Travel Time
+        BASE_TRAVEL_TIME = 1,                   -- Base travel time (in weeks)
+        MIN_TRAVEL_TIME = 0.5,                  -- Minimum travel time
+        
+        -- Wind Effects
+        WIND_WITH = -0.5,                       -- Traveling with wind (weeks modifier)
+        WIND_AGAINST = 1,                       -- Traveling against wind (weeks modifier)
+        WIND_CHANGE_INTERVAL = 4,               -- How often wind might change (weeks)
+        
+        -- Inventory
+        DEFAULT_INVENTORY_SLOTS = 10,           -- Default inventory capacity
+        
+        -- Crew Effects
+        NAVIGATOR_TRAVEL_BONUS = -0.5,          -- Time reduction with Navigator (weeks)
+        GUNNER_SKILL_MULTIPLIER = 1,            -- Multiplier for Gunner's skill level (for future balancing)
+        VICTORY_LOYALTY_BONUS = 1,              -- Loyalty boost after victory
+        RUM_LOYALTY_BONUS = 2,                  -- Loyalty boost from rum
+        VOYAGE_LOYALTY_PENALTY = -1             -- Loyalty reduction per week at sea
+    }
+}
+
+return Constants```
+
+## src/dice.lua
+```lua
+-- Dice Module
+-- Implements a reusable dice system for Forged in the Dark mechanics
+
+-- Import constants
+local Constants = require('constants')
+local AssetUtils = require('utils.assetUtils')
+
+local Dice = {
+    -- Sprite sheet for dice
+    spriteSheet = nil,
+    spriteWidth = 32,
+    spriteHeight = 32,
+    quads = {}
+}
+
+-- Initialize dice system
+function Dice:init()
+    -- Load dice sprite sheet using AssetUtils
+    self.spriteSheet = AssetUtils.loadImage("assets/dice-strip.png", "dice")
+    
+    if self.spriteSheet then
+        -- Create quads for each die face
+        for i = 0, 5 do
+            self.quads[i+1] = love.graphics.newQuad(
+                i * self.spriteWidth, 0,
+                self.spriteWidth, self.spriteHeight,
+                self.spriteSheet:getDimensions()
+            )
+        end
+        
+        print("Dice sprite sheet loaded successfully")
+    else
+        print("Will use text representation for dice")
+    end
+end
+
+-- Modifier class for dice rolls
+local Modifier = {
+    description = "",  -- Description of the modifier
+    value = 0,         -- The dice modifier value (positive or negative)
+    temporary = false  -- Whether modifier is temporary (removed after roll)
+}
+
+-- Create a new modifier
+function Modifier:new(description, value, temporary)
+    local mod = {
+        description = description or "",
+        value = value or 0,
+        temporary = temporary or false
+    }
+    setmetatable(mod, self)
+    self.__index = self
+    return mod
+end
+
+-- Roll dice with modifiers
+function Dice:roll(baseDice, modifiers)
+    local modifiers = modifiers or {}
+    local results = {}
+    local rollInfo = {
+        baseDice = baseDice,
+        modifiers = {},       -- Copy of applied modifiers
+        totalDiceCount = 0,   -- Final dice count after modifiers
+        zeroOrNegative = false, -- Flag if we had 0 or negative dice
+        results = {},         -- The actual dice values rolled
+        rolls = {}            -- All roll operations (for debugging)
+    }
+    
+    -- Calculate total dice count from modifiers
+    local totalDice = baseDice
+    local modReport = {}
+    
+    -- Apply all modifiers
+    for _, mod in ipairs(modifiers) do
+        totalDice = totalDice + mod.value
+        table.insert(modReport, {
+            description = mod.description, 
+            value = mod.value
+        })
+        table.insert(rollInfo.rolls, "Applied " .. mod.description .. ": " .. (mod.value >= 0 and "+" or "") .. mod.value .. " dice")
+    end
+    
+    -- Store the full list of applied modifiers
+    rollInfo.modifiers = modReport
+    
+    -- Handle zero or negative dice count (roll 2 dice and take worst)
+    if totalDice <= 0 then
+        rollInfo.zeroOrNegative = true
+        rollInfo.totalDiceCount = 2
+        table.insert(rollInfo.rolls, "Reduced to " .. totalDice .. " dice - rolling 2 and taking worst")
+        
+        -- Roll 2 dice
+        for i = 1, 2 do
+            local dieValue = math.random(1, 6)
+            table.insert(results, dieValue)
+            table.insert(rollInfo.rolls, "Rolled " .. dieValue)
+        end
+        
+        -- Take the worst (lowest) value
+        table.sort(results)
+        rollInfo.results = {results[1]}  -- Keep only the lowest value
+        table.insert(rollInfo.rolls, "Taking worst value: " .. results[1])
+    else
+        -- Normal dice pool - roll adjusted number of dice (max 5)
+        totalDice = math.min(5, totalDice)
+        rollInfo.totalDiceCount = totalDice
+        
+        for i = 1, totalDice do
+            local dieValue = math.random(1, 6)
+            table.insert(results, dieValue)
+            table.insert(rollInfo.rolls, "Rolled " .. dieValue)
+        end
+        
+        rollInfo.results = results
+    end
+    
+    -- Return both the roll results and the detailed roll info
+    return results, rollInfo
+end
+
+-- Interpret dice results according to Forged in the Dark rules
+function Dice:interpret(diceResults)
+    local outcome = {
+        successes = 0,      -- Full successes (die = 6)
+        partials = 0,       -- Partial successes (die = 4-5)
+        failures = 0,       -- Failures (die = 1-3)
+        highestValue = 0,   -- The highest die value rolled
+        result = "failure", -- Overall result: "failure", "partial", "success", or "critical"
+        level = 0,          -- Numeric result level: 0=failure, 1=partial, 2=success, 3=critical
+        results = diceResults -- The original dice values
+    }
+    
+    -- No dice rolled
+    if #diceResults == 0 then
+        return outcome
+    end
+    
+    -- Process each die result
+    for _, die in ipairs(diceResults) do
+        -- Track highest value
+        outcome.highestValue = math.max(outcome.highestValue, die)
+        
+        -- Categorize results
+        if die == Constants.DICE.SUCCESS then
+            -- Success
+            outcome.successes = outcome.successes + 1
+        elseif die >= Constants.DICE.PARTIAL_MIN and die <= Constants.DICE.PARTIAL_MAX then
+            -- Partial success
+            outcome.partials = outcome.partials + 1
+        else
+            -- Failure
+            outcome.failures = outcome.failures + 1
+        end
+    end
+    
+    -- Determine overall result based on Forged in the Dark rules
+    -- Rule 1: Use highest die result (not the sum)
+    -- Rule 2: 2+ successes (6s) is a critical success
+    if outcome.successes >= 2 then
+        -- Critical success (2+ dice showing 6)
+        outcome.result = "critical"
+        outcome.level = Constants.DICE.OUTCOME_CRITICAL
+    elseif outcome.successes == 1 then
+        -- Full success (1 die showing 6)
+        outcome.result = "success"
+        outcome.level = Constants.DICE.OUTCOME_SUCCESS
+    elseif outcome.partials > 0 then
+        -- Partial success (highest die is 4-5)
+        outcome.result = "partial"
+        outcome.level = Constants.DICE.OUTCOME_PARTIAL
+    else
+        -- Failure (no dice showing 4+)
+        outcome.result = "failure"
+        outcome.level = Constants.DICE.OUTCOME_FAILURE
+    end
+    
+    return outcome
+end
+
+-- Draw dice results
+function Dice:draw(diceResults, x, y, scale)
+    local scale = scale or 1
+    local padding = 2 * scale
+    local width = self.spriteWidth * scale
+    
+    -- If no sprite sheet, use text representation
+    if not self.spriteSheet then
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (20 * scale + padding)
+            
+            -- Draw die background based on value
+            if value == 6 then
+                love.graphics.setColor(0.2, 0.8, 0.2, 0.8) -- Green for success
+            elseif value >= 4 then
+                love.graphics.setColor(0.8, 0.8, 0.2, 0.8) -- Yellow for partial
+            else
+                love.graphics.setColor(0.8, 0.2, 0.2, 0.8) -- Red for failure
+            end
+            
+            love.graphics.rectangle("fill", dieX, y, 20 * scale, 20 * scale, 3, 3)
+            
+            -- Draw die value
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.print(value, dieX + 7 * scale, y + 4 * scale)
+        end
+    else
+        -- Use sprite sheet
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (width + padding)
+            if self.spriteSheet and self.quads[value] then
+                love.graphics.draw(
+                    self.spriteSheet,
+                    self.quads[value],
+                    dieX,
+                    y,
+                    0,  -- rotation
+                    scale, scale  -- scale x, y
+                )
+            else
+                -- Draw placeholder if sprite sheet or quad is missing
+                AssetUtils.drawPlaceholder(dieX, y, self.spriteWidth * scale, self.spriteHeight * scale, "dice")
+            end
+        end
+    end
+    
+    -- Return the total width used by the dice
+    return #diceResults * (self.spriteWidth * scale + padding)
+end
+
+-- Draw dice results with highlighting for dice that "count"
+function Dice:drawWithHighlight(diceResults, x, y, scale)
+    local scale = scale or 1
+    local padding = 4 * scale
+    local width = self.spriteWidth * scale
+    local outcome = self:interpret(diceResults)
+    
+    -- If no sprite sheet, use text representation
+    if not self.spriteSheet then
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (20 * scale + padding)
+            local dieY = y
+            
+            -- Apply bump to dice that count
+            if (value == 6 and outcome.successes > 0) or 
+               (value >= 4 and value <= 5 and outcome.successes == 0 and outcome.partials > 0) or
+               (value <= 3 and outcome.successes == 0 and outcome.partials == 0) then
+                -- This die "counts" - bump it up
+                dieY = y - 5 * scale
+                
+                -- Add glow/shadow for highlighted dice
+                love.graphics.setColor(1, 1, 1, 0.3)
+                love.graphics.rectangle("fill", dieX - 2, dieY - 2, 24 * scale, 24 * scale, 5, 5)
+            end
+            
+            -- Draw die background based on value
+            if value == 6 then
+                love.graphics.setColor(0.2, 0.8, 0.2, 0.8) -- Green for success
+            elseif value >= 4 then
+                love.graphics.setColor(0.8, 0.8, 0.2, 0.8) -- Yellow for partial
+            else
+                love.graphics.setColor(0.8, 0.2, 0.2, 0.8) -- Red for failure
+            end
+            
+            love.graphics.rectangle("fill", dieX, dieY, 20 * scale, 20 * scale, 3, 3)
+            
+            -- Draw die value
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.print(value, dieX + 7 * scale, dieY + 4 * scale)
+        end
+    else
+        -- Use sprite sheet
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (width + padding)
+            local dieY = y
+            
+            -- Determine if this die should be highlighted (counts toward the outcome)
+            local shouldHighlight = false
+            
+            -- Critical success - all 6s count
+            if outcome.result == "critical" and value == Constants.DICE.SUCCESS then
+                shouldHighlight = true
+            -- Regular success - only one 6 counts (use the first one found)
+            elseif outcome.result == "success" and value == Constants.DICE.SUCCESS then
+                -- If we haven't yet highlighted a success die
+                if not outcome.hasHighlightedSuccess then
+                    shouldHighlight = true
+                    outcome.hasHighlightedSuccess = true
+                end
+            -- Partial success - only 4-5s count if there are no 6s
+            -- Always highlight the highest value die (4 or 5)
+            elseif outcome.result == "partial" then
+                -- Find the highest partial success die (4-5)
+                if not outcome.highestPartialValue then
+                    outcome.highestPartialValue = 0
+                    for _, v in ipairs(diceResults) do
+                        if v >= Constants.DICE.PARTIAL_MIN and v <= Constants.DICE.PARTIAL_MAX and v > outcome.highestPartialValue then
+                            outcome.highestPartialValue = v
+                        end
+                    end
+                end
+                
+                -- Highlight only the highest partial success die
+                if value == outcome.highestPartialValue and not outcome.hasHighlightedPartial then
+                    shouldHighlight = true
+                    outcome.hasHighlightedPartial = true
+                end
+            -- Failure - highlight the highest die (still a failure, but clearer)
+            elseif outcome.result == "failure" then
+                -- Find the highest die (which is still ≤ 3 for a failure)
+                if not outcome.highestFailureValue then
+                    outcome.highestFailureValue = 0
+                    for _, v in ipairs(diceResults) do
+                        if v <= Constants.DICE.FAILURE_MAX and v > outcome.highestFailureValue then
+                            outcome.highestFailureValue = v
+                        end
+                    end
+                end
+                
+                -- Highlight only the highest failure die
+                if value == outcome.highestFailureValue and not outcome.hasHighlightedFailure then
+                    shouldHighlight = true
+                    outcome.hasHighlightedFailure = true
+                end
+            end
+            
+            -- Apply bump to dice that count
+            if shouldHighlight then
+                -- This die "counts" - bump it up
+                dieY = y - 8 * scale
+            end
+            
+            -- Check if we can draw the die using the spritesheet
+            if self.spriteSheet and self.quads[value] then
+                -- Draw the die with appropriate highlight
+                love.graphics.setColor(1, 1, 1, 1)
+                if shouldHighlight then
+                    -- Add shadow for 3D effect
+                    love.graphics.setColor(0.3, 0.3, 0.3, 0.5)
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX + 2,
+                        dieY + 2,
+                        0,  -- rotation
+                        scale, scale  -- scale x, y
+                    )
+                    
+                    -- Draw highlighted die slightly larger
+                    love.graphics.setColor(1, 1, 1, 1)
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX,
+                        dieY,
+                        0,  -- rotation
+                        scale * 1.1, scale * 1.1  -- slightly larger scale
+                    )
+                else
+                    -- Draw regular die
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX,
+                        dieY,
+                        0,  -- rotation
+                        scale, scale  -- scale x, y
+                    )
+                end
+            else
+                -- Draw placeholder if sprite sheet or quad is missing
+                local placeholderHeight = self.spriteHeight * (shouldHighlight and scale * 1.1 or scale)
+                local placeholderWidth = self.spriteWidth * (shouldHighlight and scale * 1.1 or scale)
+                
+                AssetUtils.drawPlaceholder(dieX, dieY, placeholderWidth, placeholderHeight, "dice")
+                
+                -- Draw the die value as text in the center of the placeholder
+                love.graphics.setColor(1, 1, 1, 1)
+                love.graphics.print(value, dieX + placeholderWidth/2 - 5, dieY + placeholderHeight/2 - 8)
+            end
+        end
+    end
+    
+    -- Return the total width used by the dice
+    return #diceResults * (self.spriteWidth * scale + padding)
+end
+
+-- Get result text description
+function Dice:getResultText(outcome)
+    if outcome.result == "critical" then
+        return "Critical Success!"
+    elseif outcome.result == "success" then
+        return "Success"
+    elseif outcome.result == "partial" then
+        return "Partial Success"
+    else
+        return "Failure"
+    end
+end
+
+-- Get result color
+function Dice:getResultColor(outcome)
+    if outcome.result == "critical" then
+        return Constants.COLORS.HEALTH -- Bright green
+    elseif outcome.result == "success" then
+        return Constants.COLORS.PLAYER_SHIP -- Green
+    elseif outcome.result == "partial" then
+        return Constants.COLORS.GOLD -- Yellow
+    else
+        return Constants.COLORS.DAMAGE -- Red
+    end
+end
+
+-- Create a helper function to easily create modifiers
+function Dice:createModifier(description, value, temporary)
+    return Modifier:new(description, value, temporary)
+end
+
+-- Draw modifiers list
+function Dice:drawModifiers(modifiers, x, y, scale)
+    love.graphics.setColor(1, 1, 1, 1)
+    local yPos = y
+    local scale = scale or 1
+    local lineHeight = 20 * scale
+    
+    for i, mod in ipairs(modifiers) do
+        -- Choose color based on modifier value
+        if mod.value > 0 then
+            love.graphics.setColor(0.2, 0.8, 0.2, 1) -- Green for positive
+        else
+            love.graphics.setColor(0.8, 0.2, 0.2, 1) -- Red for negative
+        end
+        
+        local sign = mod.value > 0 and "+" or ""
+        love.graphics.print(mod.description .. ": " .. sign .. mod.value .. " dice", x, yPos)
+        yPos = yPos + lineHeight
+    end
+    
+    -- Reset color
+    love.graphics.setColor(1, 1, 1, 1)
+    
+    return yPos - y  -- Return total height used
+end
+
+-- Export the module and the Modifier class
+return {
+    dice = Dice,
+    Modifier = Modifier
+}```
+
 ## src/gameState.lua
 ```lua
 -- Game State Module
 -- Central repository for game state that needs to be accessed across modules
+
+-- Import ship utils
+local shipUtils = require('utils.shipUtils')
+
+-- Import constants
+local Constants = require('constants')
 
 local GameState = {
     -- Player ship information
@@ -36,38 +2939,39 @@ local GameState = {
         x = 0,
         y = 0,
         isMoving = false,
-        -- Ship stats
-        speed = 3,          -- Hexes per turn in combat (future feature)
-        firepower = 2,      -- Number of cannons
-        durability = 10,    -- Hull hit points
-        crewCapacity = 4    -- Maximum crew size
+        -- Ship stats will be initialized based on class in init()
+        speed = nil,
+        firepower = nil,
+        durability = nil,
+        crewCapacity = nil
     },
     
     -- Time tracking
     time = {
         currentWeek = 1,
-        totalWeeks = 72,
+        totalWeeks = Constants.GAME.TOTAL_WEEKS,
         earthquakeWeek = nil,  -- Set during initialization
         isGameOver = false
     },
     
     -- Player resources
     resources = {
-        gold = 50,          -- Starting gold
-        rum = 0,
-        timber = 0,
-        gunpowder = 0
+        gold = Constants.GAME.DEFAULT_GOLD,          -- Starting gold
+        rum = Constants.GAME.DEFAULT_RUM,
+        timber = Constants.GAME.DEFAULT_TIMBER,
+        gunpowder = Constants.GAME.DEFAULT_GUNPOWDER
     },
     
-    -- Inventory system (10 slots for cargo and special items)
+    -- Inventory system for cargo and special items
     inventory = {
-        slots = {}          -- Will contain inventory slot objects
+        slots = {},         -- Will contain inventory slot objects
+        capacity = Constants.GAME.DEFAULT_INVENTORY_SLOTS
     },
     
     -- Crew management
     crew = {
         members = {},       -- Will contain crew member objects
-        morale = 5,         -- Scale 1-10
+        morale = Constants.GAME.DEFAULT_MORALE,  -- Scale 1-10
         
         -- Global crew pool - tracks all possible crew members in the game
         -- Each crew member has a unique ID
@@ -106,11 +3010,15 @@ local GameState = {
     settings = {
         debug = false,  -- Set to false for normal gameplay, true for debugging
         portMode = false,  -- When true, display port/location interface instead of map
+        combatMode = false,  -- When true, display naval combat interface
         currentPortScreen = "main",  -- Which port screen to display: main, tavern, shipyard, crew, inventory
         
         -- Ship state flags
         moored = false  -- When true, ship is docked at a location rather than at sea
-    }
+    },
+    
+    -- Combat state will be populated when a battle starts
+    -- Structure shown in combat.lua
 }
 
 -- Initialize game state
@@ -118,11 +3026,19 @@ function GameState:init()
     -- Seed random number generator
     math.randomseed(os.time())
     
-    -- Set earthquake week (random between weeks 60-72)
-    self.time.earthquakeWeek = math.random(60, 72)
+    -- Set earthquake week (random between the configured weeks)
+    self.time.earthquakeWeek = math.random(Constants.GAME.EARTHQUAKE_MIN_WEEK, 
+                                         Constants.GAME.EARTHQUAKE_MAX_WEEK)
     
     -- Initialize wind direction (random)
     self.environment.wind.currentDirection = self.environment.wind.directions[math.random(#self.environment.wind.directions)]
+    
+    -- Initialize ship stats based on class
+    local stats = shipUtils.getShipBaseStats(self.ship.class)
+    self.ship.speed = stats.speed
+    self.ship.firepower = stats.firepowerDice
+    self.ship.durability = stats.durability
+    self.ship.crewCapacity = stats.crewCapacity
     
     -- Initialize the crew pool
     self:initializeCrewPool()
@@ -310,6 +3226,13 @@ function GameState:reset()
     self.ship.x = 0
     self.ship.y = 0
     self.ship.isMoving = false
+    
+    -- Reset ship stats based on class
+    local stats = shipUtils.getShipBaseStats(self.ship.class)
+    self.ship.speed = stats.speed
+    self.ship.firepower = stats.firepowerDice
+    self.ship.durability = stats.durability
+    self.ship.crewCapacity = stats.crewCapacity
     
     -- Reset interface modes
     self.settings.portMode = false
@@ -528,10 +3451,10 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     
     -- With the wind (same direction): reduce travel time
     if travelDirection == windDirection then
-        windModifier = -0.5  -- Half a week faster with the wind
+        windModifier = Constants.GAME.WIND_WITH  -- Faster with the wind
     -- Against the wind (sailing into the wind): +1 week
     elseif travelDirection == oppositeOf[windDirection] then
-        windModifier = 1
+        windModifier = Constants.GAME.WIND_AGAINST
     -- Perpendicular to wind: no modifier
     else
         windModifier = 0
@@ -543,15 +3466,15 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     -- Apply navigator modifier if present
     local navigatorEffect = ""
     if hasNavigator then
-        travelTime = travelTime - 0.5
+        travelTime = travelTime + Constants.GAME.NAVIGATOR_TRAVEL_BONUS
         navigatorEffect = " with Navigator"
         if self.settings.debug then
-            print("Navigator reducing travel time by 0.5 weeks")
+            print("Navigator reducing travel time by " .. math.abs(Constants.GAME.NAVIGATOR_TRAVEL_BONUS) .. " weeks")
         end
     end
     
-    -- Ensure minimum 0.5 week travel time
-    travelTime = math.max(0.5, travelTime)
+    -- Ensure minimum travel time
+    travelTime = math.max(Constants.GAME.MIN_TRAVEL_TIME, travelTime)
     
     -- Create wind effect description
     local windEffect = ""
@@ -707,6 +3630,8 @@ local gameMap = require('map')
 local playerShip = require('ship')
 local timeSystem = require('time')
 local portRoyal = require('portRoyal')
+local combatSystem = require('combat')
+local AssetUtils = require('utils.assetUtils')
 
 function love.load()
     -- Load game assets and initialize states
@@ -723,12 +3648,22 @@ function love.load()
     gameMap:load(gameState)     -- Initialize map 
     playerShip:load(gameState, gameMap)  -- Initialize ship
     portRoyal:load(gameState)   -- Initialize Port Royal interface
+    combatSystem:load(gameState)  -- Initialize combat system
+    
+    -- Store base dimensions for scaling calculations
+    gameState.settings.baseWidth = 800
+    gameState.settings.baseHeight = 600
+    gameState.settings.scale = 1
+    gameState.settings.offsetX = 0
+    gameState.settings.offsetY = 0
     
     -- Set window properties
     love.window.setTitle("Pirate's Wager: Blood for Gold")
     love.window.setMode(800, 600, {
         vsync = true,
-        resizable = false
+        resizable = true,  -- Allow window resizing with letterboxing/pillarboxing
+        minwidth = 400,    -- Minimum window width
+        minheight = 300    -- Minimum window height
     })
 end
 
@@ -736,8 +3671,11 @@ function love.update(dt)
     -- Early return if game is paused
     if gameState.settings.isPaused then return end
     
-    -- Update game state
-    if gameState.settings.portMode then
+    -- Update game state based on current mode
+    if gameState.settings.combatMode then
+        -- Update naval combat
+        combatSystem:update(dt, gameState)
+    elseif gameState.settings.portMode then
         -- Update port interface
         portRoyal:update(dt, gameState)
     else
@@ -756,12 +3694,60 @@ function love.update(dt)
         gameMap:load(gameState)
         playerShip:load(gameState, gameMap)
         portRoyal:load(gameState)
+        combatSystem:load(gameState)
+    end
+end
+
+-- Handle window resize events
+function love.resize(w, h)
+    -- Calculate new scale factor to maintain exact 4:3 aspect ratio (800x600)
+    local scaleX = w / gameState.settings.baseWidth
+    local scaleY = h / gameState.settings.baseHeight
+    
+    -- Use the smaller scale to ensure everything fits
+    gameState.settings.scale = math.min(scaleX, scaleY)
+    
+    -- Calculate letterbox or pillarbox dimensions for centering
+    gameState.settings.offsetX = math.floor((w - gameState.settings.baseWidth * gameState.settings.scale) / 2)
+    gameState.settings.offsetY = math.floor((h - gameState.settings.baseHeight * gameState.settings.scale) / 2)
+    
+    -- Print debug info
+    if gameState.settings.debug then
+        print("Window resized to " .. w .. "x" .. h)
+        print("Scale factor: " .. gameState.settings.scale)
+        print("Offset: " .. gameState.settings.offsetX .. ", " .. gameState.settings.offsetY)
     end
 end
 
 function love.draw()
+    local w, h = love.graphics.getDimensions()
+    
+    -- Draw black background for the entire window (for letterboxing/pillarboxing)
+    love.graphics.setColor(0, 0, 0, 1)
+    love.graphics.rectangle("fill", 0, 0, w, h)
+    
+    -- Set up the scaling transformation
+    love.graphics.push()
+    
+    -- Apply offset for letterboxing/pillarboxing
+    love.graphics.translate(gameState.settings.offsetX or 0, gameState.settings.offsetY or 0)
+    
+    -- Apply scaling
+    love.graphics.scale(gameState.settings.scale or 1)
+    
+    -- Set scissor to ensure nothing renders outside our 800x600 game area
+    love.graphics.setScissor(
+        gameState.settings.offsetX,
+        gameState.settings.offsetY,
+        gameState.settings.baseWidth * gameState.settings.scale,
+        gameState.settings.baseHeight * gameState.settings.scale
+    )
+    
     -- Render game based on current mode
-    if gameState.settings.portMode then
+    if gameState.settings.combatMode then
+        -- Draw naval combat
+        combatSystem:draw(gameState)
+    elseif gameState.settings.portMode then
         -- Draw port interface
         portRoyal:draw(gameState)
     else
@@ -777,31 +3763,83 @@ function love.draw()
     if gameState.settings.debug then
         love.graphics.setColor(1, 1, 1, 1)
         love.graphics.print("FPS: " .. tostring(love.timer.getFPS()), 10, 10)
+        love.graphics.print("Scale: " .. string.format("%.2f", gameState.settings.scale), 10, 30)
+        love.graphics.print("Window: " .. w .. "x" .. h, 10, 50)
+    end
+    
+    -- Clear scissor and end the transformation
+    love.graphics.setScissor()
+    love.graphics.pop()
+    
+    -- Draw letterbox/pillarbox borders if needed
+    if gameState.settings.scale < 1 or w ~= gameState.settings.baseWidth or h ~= gameState.settings.baseHeight then
+        love.graphics.setColor(0.1, 0.1, 0.1, 1) -- Dark gray borders
+        
+        -- Draw edge lines to make the borders more visible
+        love.graphics.setColor(0.3, 0.3, 0.3, 1)
+        -- Top border edge
+        if gameState.settings.offsetY > 0 then
+            love.graphics.rectangle("fill", 0, gameState.settings.offsetY - 1, w, 1)
+        end
+        -- Bottom border edge
+        if gameState.settings.offsetY > 0 then
+            love.graphics.rectangle("fill", 0, gameState.settings.offsetY + (gameState.settings.baseHeight * gameState.settings.scale), w, 1)
+        end
+        -- Left border edge
+        if gameState.settings.offsetX > 0 then
+            love.graphics.rectangle("fill", gameState.settings.offsetX - 1, 0, 1, h)
+        end
+        -- Right border edge
+        if gameState.settings.offsetX > 0 then
+            love.graphics.rectangle("fill", gameState.settings.offsetX + (gameState.settings.baseWidth * gameState.settings.scale), 0, 1, h)
+        end
     end
 end
 
+-- Helper function to convert screen coordinates to game coordinates
+function convertMousePosition(x, y)
+    -- Adjust for the offset and scaling
+    local gameX = (x - (gameState.settings.offsetX or 0)) / (gameState.settings.scale or 1)
+    local gameY = (y - (gameState.settings.offsetY or 0)) / (gameState.settings.scale or 1)
+    
+    return gameX, gameY
+end
+
 function love.mousemoved(x, y)
-    if gameState.settings.portMode then
-        portRoyal:mousemoved(x, y, gameState)
+    -- Convert screen coordinates to game coordinates
+    local gameX, gameY = convertMousePosition(x, y)
+    
+    if gameState.settings.combatMode then
+        combatSystem:mousemoved(gameX, gameY, gameState)
+    elseif gameState.settings.portMode then
+        portRoyal:mousemoved(gameX, gameY, gameState)
     else
-        gameMap:mousemoved(x, y, gameState)
+        gameMap:mousemoved(gameX, gameY, gameState)
     end
 end
 
 function love.mousepressed(x, y, button)
     if gameState.time.isGameOver then return end
     
-    if gameState.settings.portMode then
-        portRoyal:mousepressed(x, y, button, gameState)
+    -- Convert screen coordinates to game coordinates
+    local gameX, gameY = convertMousePosition(x, y)
+    
+    if gameState.settings.combatMode then
+        combatSystem:mousepressed(gameX, gameY, button, gameState)
+    elseif gameState.settings.portMode then
+        portRoyal:mousepressed(gameX, gameY, button, gameState)
     else
-        gameMap:mousepressed(x, y, button, gameState)
+        gameMap:mousepressed(gameX, gameY, button, gameState)
     end
 end
 
 function love.keypressed(key)
     if key == "escape" then
+        -- If in combat mode, end the battle
+        if gameState.settings.combatMode then
+            combatSystem:endBattle(gameState)
         -- If in port mode, return to map
-        if gameState.settings.portMode then
+        elseif gameState.settings.portMode then
             gameState.settings.portMode = false
             gameState.settings.currentPortScreen = "main"
         else
@@ -809,21 +3847,32 @@ function love.keypressed(key)
         end
     elseif key == "f1" then
         gameState.settings.debug = not gameState.settings.debug
+    elseif key == "f9" and gameState.settings.debug then
+        -- Toggle button hitbox visualization in debug mode
+        if gameState.settings.combatMode then
+            combatSystem.showDebugHitboxes = not combatSystem.showDebugHitboxes
+            print("Button hitboxes: " .. (combatSystem.showDebugHitboxes and "ON" or "OFF"))
+        end
     elseif key == "p" then
         gameState.settings.isPaused = not gameState.settings.isPaused
+    elseif key == "c" and not gameState.settings.combatMode then
+        -- Debug key to start a test battle
+        combatSystem:startBattle(gameState, "sloop")
     end
 end```
 
 ## src/map.lua
 ```lua
 -- Caribbean Map Module
+local AssetUtils = require('utils.assetUtils')
 
 local Map = {
     zones = {},
     hoveredZone = nil,
     -- Base map dimensions
     width = 800,
-    height = 600
+    height = 600,
+    background = nil
 }
 
 -- Zone definitions
@@ -987,13 +4036,10 @@ function Map:load(gameState)
         end
     end
     
-    -- Load background image if available
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/caribbean_map.png")
-    end)
+    -- Load background image using AssetUtils
+    self.background = AssetUtils.loadImage("assets/caribbean_map.png", "map")
     
-    if success then
-        self.background = result
+    if self.background then
         print("Map background loaded successfully")
     else
         print("Map background image not found. Background will be displayed as blue rectangle.")
@@ -1025,7 +4071,8 @@ function Map:draw(gameState)
         love.graphics.setColor(1, 1, 1, 1)  -- White, fully opaque
         love.graphics.draw(self.background, 0, 0)
     else
-        love.graphics.setColor(0.1, 0.3, 0.5, 1)  -- Deep blue ocean background
+        -- Use deep blue ocean as fallback background
+        love.graphics.setColor(0.1, 0.3, 0.5, 1)
         love.graphics.rectangle("fill", 0, 0, self.width, self.height)
     end
     
@@ -1308,6 +4355,8 @@ return Map```
 -- Port Interface Module
 -- Currently focused on Port Royal but can be extended to all locations
 
+local AssetUtils = require('utils.assetUtils')
+
 local PortRoyal = {
     -- UI constants
     width = 800,
@@ -1405,30 +4454,24 @@ function PortRoyal:load(gameState)
         }
     }
     
-    -- Load placeholder background images if available
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port_royal_main.png")
-    end)
-    if success then
-        self.backgrounds.main = result
+    -- Validate required parameters
+    assert(gameState, "gameState is required for PortRoyal:load")
+    
+    -- Load placeholder background images using AssetUtils
+    self.backgrounds.main = AssetUtils.loadImage("assets/port_royal_main.png", "ui")
+    if self.backgrounds.main then
         print("Port Royal main background loaded")
     end
     
     -- Load tavern background
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port-royal-tavern.png")
-    end)
-    if success then
-        self.backgrounds.tavern = result
+    self.backgrounds.tavern = AssetUtils.loadImage("assets/port-royal-tavern.png", "ui")
+    if self.backgrounds.tavern then
         print("Port Royal tavern background loaded")
     end
     
     -- Load shipyard background
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port-royal-shipyard.png")
-    end)
-    if success then
-        self.backgrounds.shipyard = result
+    self.backgrounds.shipyard = AssetUtils.loadImage("assets/port-royal-shipyard.png", "ui")
+    if self.backgrounds.shipyard then
         print("Port Royal shipyard background loaded")
     end
 end
@@ -2078,25 +5121,21 @@ function PortRoyal:drawBackground(screen)
     local locationBackground = nil
     
     if screen == "main" then
-        local success, result = pcall(function()
-            return love.graphics.newImage("assets/" .. locationKey .. "_main.png")
-        end)
-        if success then
-            locationBackground = result
-        end
+        -- Use AssetUtils to load the location-specific background
+        locationBackground = AssetUtils.loadImage("assets/" .. locationKey .. "_main.png", "ui")
     end
     
     -- Check if we have a background image for this screen
     if locationBackground then
         -- We have a location-specific background
-        love.graphics.draw(locationBackground, 0, 0)
+        AssetUtils.drawImage(locationBackground, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "main" and self.backgrounds.main then
         -- Fall back to generic port background
-        love.graphics.draw(self.backgrounds.main, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.main, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "tavern" and self.backgrounds.tavern then
-        love.graphics.draw(self.backgrounds.tavern, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.tavern, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "shipyard" and self.backgrounds.shipyard then
-        love.graphics.draw(self.backgrounds.shipyard, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.shipyard, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     else
         -- Draw a fallback colored background
         if screen == "main" then
@@ -2214,6 +5253,7 @@ return PortRoyal```
 ## src/ship.lua
 ```lua
 -- Ship Module
+local AssetUtils = require('utils.assetUtils')
 
 local Ship = {
     -- Visual properties (display-only, gameplay state is in gameState)
@@ -2234,10 +5274,15 @@ local Ship = {
 
 -- Initialize ship
 function Ship:load(gameState, gameMap)
-    -- Load ship sprites
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Ship:load")
+    assert(gameMap, "gameMap is required for Ship:load")
+    
+    -- Load ship sprites using AssetUtils
     self.sprites = {
-        sloop = love.graphics.newImage("assets/sloop.png")
-        -- Will add brigantine.png and galleon.png when available
+        sloop = AssetUtils.loadImage("assets/sloop.png", "ship"),
+        brigantine = AssetUtils.loadImage("assets/brigantine-top-down.png", "ship"),
+        galleon = nil -- Not yet available
     }
     -- Find Port Royal and set it as starting location
     for i, zone in ipairs(gameMap.zones) do
@@ -2291,32 +5336,29 @@ end
 
 -- Draw the ship
 function Ship:draw(gameState)
+    -- Validate required parameters
+    if not gameState then
+        print("ERROR: gameState is required for Ship:draw")
+        return
+    end
+    
     -- Get the ship's current class (defaulting to sloop for now)
     local shipClass = gameState.ship.class or "sloop"
     local sprite = self.sprites[shipClass]
     
-    -- If sprite exists, draw it centered on the ship's position
+    -- Use AssetUtils to safely draw the ship sprite
     if sprite then
         love.graphics.setColor(1, 1, 1, 1)  -- Full white, no tint
         love.graphics.draw(sprite, gameState.ship.x, gameState.ship.y, 0, 1, 1, 
-                           sprite:getWidth()/2, sprite:getHeight()/2)
+                         sprite:getWidth()/2, sprite:getHeight()/2)
     else
-        -- Fallback to triangular shape if sprite not found
-        love.graphics.setColor(unpack(self.color))
-        
-        -- Draw a triangular ship shape
-        love.graphics.polygon("fill", 
-            gameState.ship.x, gameState.ship.y - self.size,  -- Top point
-            gameState.ship.x - self.size/1.5, gameState.ship.y + self.size/1.5,  -- Bottom left
-            gameState.ship.x + self.size/1.5, gameState.ship.y + self.size/1.5   -- Bottom right
-        )
-        
-        -- Draw outline
-        love.graphics.setColor(0, 0, 0, 0.7)
-        love.graphics.polygon("line", 
-            gameState.ship.x, gameState.ship.y - self.size,
-            gameState.ship.x - self.size/1.5, gameState.ship.y + self.size/1.5,
-            gameState.ship.x + self.size/1.5, gameState.ship.y + self.size/1.5
+        -- Draw a placeholder with the appropriate ship size
+        local width = self.size * 3
+        local height = self.size * 2
+        AssetUtils.drawPlaceholder(
+            gameState.ship.x - width/2, 
+            gameState.ship.y - height/2, 
+            width, height, "ship"
         )
     end
     
@@ -2326,6 +5368,12 @@ end
 
 -- Move ship to a new zone
 function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
+    -- Validate required parameters
+    assert(targetZoneIndex and type(targetZoneIndex) == "number", "targetZoneIndex must be a number")
+    assert(gameState, "gameState is required for Ship:moveToZone")
+    assert(gameMap, "gameMap is required for Ship:moveToZone")
+    assert(targetZoneIndex <= #gameMap.zones, "targetZoneIndex out of bounds")
+    
     if not gameState.ship.isMoving then
         local targetZone = gameMap.zones[targetZoneIndex]
         local currentZone = gameMap.zones[gameState.ship.currentZone]
@@ -2385,6 +5433,11 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
             -- We no longer automatically enter Port Royal
             -- This will be handled by the mooring system instead
             
+            -- Check if we should trigger a random encounter (20% chance)
+            if targetZone.name ~= "Port Royal" and math.random() < 0.2 then
+                self:initiateEncounter(gameState)
+            end
+            
             return true
         else
             print("Cannot move to " .. targetZone.name .. " - not adjacent to current zone")
@@ -2394,6 +5447,38 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
         print("Ship is already in motion")
         return false
     end
+end
+
+-- Initiate an encounter with an enemy ship
+function Ship:initiateEncounter(gameState)
+    -- In a complete implementation, this would have different encounter types
+    -- and could include narrative events, but for now, we'll focus on combat
+    
+    -- Check if combat system is loaded
+    local combatSystem = require('combat')
+    if not combatSystem then
+        print("Error: Combat system not loaded")
+        return false
+    end
+    
+    -- Determine what type of ship the player encounters
+    local encounterRoll = math.random()
+    local enemyShipClass
+    
+    -- Higher level zones would affect encounter difficulty, but for now:
+    if encounterRoll < 0.6 then
+        enemyShipClass = "sloop"      -- 60% chance of encountering a sloop
+    elseif encounterRoll < 0.9 then
+        enemyShipClass = "brigantine" -- 30% chance of encountering a brigantine
+    else
+        enemyShipClass = "galleon"    -- 10% chance of encountering a galleon
+    end
+    
+    -- Start naval combat
+    print("Encountered an enemy " .. enemyShipClass .. "! Prepare for battle!")
+    combatSystem:startBattle(gameState, enemyShipClass)
+    
+    return true
 end
 
 return Ship```
@@ -2536,7 +5621,393 @@ end
 
 return TimeSystem```
 
+## src/utils/assetUtils.lua
+```lua
+-- Asset Utilities Module
+-- Centralizes asset loading with better error handling
+
+local AssetUtils = {}
+
+-- Default placeholder images for different asset types
+local DEFAULT_PLACEHOLDERS = {
+    ship = {r = 0.2, g = 0.5, b = 0.8}, -- Blue rectangle for ships
+    map = {r = 0.1, g = 0.3, b = 0.2},  -- Green rectangle for map elements
+    ui = {r = 0.4, g = 0.4, b = 0.4},   -- Gray rectangle for UI elements
+    dice = {r = 0.7, g = 0.7, b = 0.2}  -- Yellow rectangle for dice
+}
+
+-- Table to store loaded assets for reference
+AssetUtils.loadedAssets = {}
+
+-- Load an image with error handling
+-- @param filePath - The path to the image file
+-- @param assetType - Type of asset (ship, map, ui, dice) for fallback coloring
+-- @return The loaded image or nil if loading failed
+function AssetUtils.loadImage(filePath, assetType)
+    -- Validate inputs
+    if not filePath then
+        print("ERROR: No file path provided to AssetUtils.loadImage")
+        return nil
+    end
+    
+    -- Normalize asset type
+    assetType = assetType or "ui"
+    
+    -- Check if we've already loaded this asset
+    if AssetUtils.loadedAssets[filePath] then
+        return AssetUtils.loadedAssets[filePath]
+    end
+    
+    -- Try to load the image
+    local success, result = pcall(function() 
+        return love.graphics.newImage(filePath)
+    end)
+    
+    -- Handle the result
+    if success then
+        -- Store the loaded image for future reference
+        AssetUtils.loadedAssets[filePath] = result
+        return result
+    else
+        -- Print detailed error message
+        print("ERROR: Failed to load asset: " .. filePath)
+        print("Reason: " .. tostring(result))
+        return nil
+    end
+end
+
+-- Draw a placeholder rectangle for a missing asset
+-- @param x, y - Position to draw at
+-- @param width, height - Dimensions of the placeholder
+-- @param assetType - Type of asset (ship, map, ui, dice) for coloring
+function AssetUtils.drawPlaceholder(x, y, width, height, assetType)
+    -- Get placeholder color based on asset type
+    local colorDef = DEFAULT_PLACEHOLDERS[assetType] or DEFAULT_PLACEHOLDERS.ui
+    
+    -- Save current color
+    local r, g, b, a = love.graphics.getColor()
+    
+    -- Draw the placeholder
+    love.graphics.setColor(colorDef.r, colorDef.g, colorDef.b, 0.8)
+    love.graphics.rectangle("fill", x, y, width, height)
+    
+    -- Draw a border
+    love.graphics.setColor(1, 1, 1, 0.5)
+    love.graphics.rectangle("line", x, y, width, height)
+    
+    -- Draw a missing texture pattern
+    love.graphics.setColor(1, 0, 1, 0.5) -- Magenta
+    love.graphics.line(x, y, x + width, y + height)
+    love.graphics.line(x + width, y, x, y + height)
+    
+    -- Restore original color
+    love.graphics.setColor(r, g, b, a)
+end
+
+-- Safely draw an image, with fallback to placeholder if image is nil
+-- @param image - The image to draw
+-- @param x, y - Position to draw at
+-- @param angle, sx, sy - Rotation and scale (optional)
+-- @param width, height - Dimensions for placeholder if image is nil
+-- @param assetType - Type of asset for placeholder coloring
+function AssetUtils.drawImage(image, x, y, angle, sx, sy, width, height, assetType)
+    if image then
+        love.graphics.draw(image, x, y, angle or 0, sx or 1, sy or 1)
+    else
+        -- Draw placeholder if image is nil
+        AssetUtils.drawPlaceholder(x, y, width or 32, height or 32, assetType)
+    end
+end
+
+return AssetUtils```
+
+## src/utils/shipUtils.lua
+```lua
+-- Ship Stats Utility Module
+-- Centralizes all ship stat lookups and calculations
+
+local ShipUtils = {}
+
+-- Base stats for each ship class
+local SHIP_BASE_STATS = {
+    sloop = {
+        speed = 3,
+        firepowerDice = 1,
+        durability = 10,
+        crewCapacity = 4,
+        baseCP = 2
+    },
+    brigantine = {
+        speed = 2,
+        firepowerDice = 3,
+        durability = 20,
+        crewCapacity = 8,
+        baseCP = 4
+    },
+    galleon = {
+        speed = 1,
+        firepowerDice = 6,
+        durability = 40,
+        crewCapacity = 12,
+        baseCP = 6
+    }
+}
+
+-- Returns the complete set of base stats for a ship class
+function ShipUtils.getShipBaseStats(shipClass)
+    return SHIP_BASE_STATS[shipClass] or SHIP_BASE_STATS["sloop"]
+end
+
+-- Returns maximum durability (HP) for a ship class
+function ShipUtils.getMaxHP(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.durability or 10
+end
+
+-- Returns base firepower dice for a ship class
+function ShipUtils.getBaseFirepowerDice(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.firepowerDice or 1
+end
+
+-- Returns base movement speed for a ship class
+function ShipUtils.getBaseSpeed(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.speed or 3
+end
+
+-- Returns base crew points (CP) for a ship class
+function ShipUtils.getBaseCP(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.baseCP or 2
+end
+
+-- Returns crew capacity for a ship class
+function ShipUtils.getCrewCapacity(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.crewCapacity or 4
+end
+
+return ShipUtils```
+
 # Documentation
+
+## docs/CombatSystem.md
+# Combat System Documentation
+
+## Overview
+
+The combat system implements naval battles on a 10x10 hex grid. Ships of different classes occupy different numbers of hexes and have different movement speeds. The system includes movement mechanics, combat actions, and dice roll mechanics based on the Forged in the Dark system.
+
+## Hex Grid System
+
+The combat grid uses a "pointy-top" hex coordinate system with the following properties:
+
+- Grid size: 10x10 hexes
+- Coordinate system: uses axial coordinates (q,r) where:
+  - q increases from west to east
+  - r increases from northwest to southeast
+  - (0,0) is the top-left hex
+
+## Ship Classes on the Hex Grid
+
+Ship classes have different sizes and shapes on the hex grid:
+
+1. **Sloop (1-Hex Ship)**
+   - Occupies 1 hex
+   - Speed: 3 hexes per turn
+   - Shape: Single hex
+
+2. **Brigantine (2-Hex Ship)**
+   - Occupies 2 hexes in a line
+   - Speed: 2 hexes per turn
+   - Shape: 2 hexes in a row
+
+3. **Galleon (4-Hex Ship)**
+   - Occupies 4 hexes in a kite shape
+   - Speed: 1 hex per turn
+   - Shape: 1 hex bow, 2 hex midship, 1 hex stern
+
+## Combat Flow
+
+1. **Battle Initialization**
+   - Player and enemy ships are placed on opposite sides of the hex grid
+   - Turn order is established (player first)
+
+2. **Movement Phase**
+   - The player can move their ship up to its maximum speed
+   - Movement is done one hex at a time to adjacent hexes
+   - Ships cannot move through occupied hexes
+
+3. **Attack Phase** (not yet implemented)
+   - After movement, ships can attack if in range
+   - Attack success is based on dice rolls from the Forged in the Dark system
+
+4. **End of Turn**
+   - Turn passes to the enemy
+   - The process repeats until one ship is defeated or retreats
+
+## Game State Integration
+
+Combat state is stored in the gameState object under the combat property with the following structure:
+
+```lua
+gameState.combat = {
+    grid = {},  -- 2D array representing the hex grid
+    playerShip = {
+        class = "sloop",  -- Ship class (sloop, brigantine, galleon)
+        size = 1,         -- Number of hexes occupied
+        position = {5, 5}, -- {q, r} coordinates on grid
+        orientation = 0,   -- Direction ship is facing (0-5, for 60° increments)
+        movesRemaining = 3 -- Based on ship speed
+    },
+    enemyShip = {
+        class = "sloop",
+        size = 1,
+        position = {2, 2},
+        orientation = 3,
+        movesRemaining = 3
+    },
+    turn = "player", -- Whose turn is it (player or enemy)
+    phase = "movement", -- Current phase (movement, attack, etc.)
+}
+```
+
+## Controls
+
+- **Mouse Hover**: Highlights hexes on the grid
+- **Click on Player Ship**: Selects the ship and shows valid movement hexes
+- **Click on Valid Movement Hex**: Moves the ship to that hex
+- **ESC Key**: Exits combat mode
+- **C Key**: Debug key to start a test battle
+
+## Triggering Combat
+
+Naval battles can be triggered in two ways:
+
+1. **Random Encounters**: When sailing between zones, there's a 20% chance of encountering an enemy ship
+2. **Debug Mode**: Press 'C' key to start a test battle
+
+## Combat Actions
+
+The combat system includes three core actions:
+
+1. **Fire Cannons**: Attack enemy ships
+   - Uses the ship's firepower attribute to determine number of dice
+   - Each success deals 1 point of damage
+   - Damage is applied to the enemy ship's durability
+
+2. **Evade**: Attempt to dodge enemy attacks
+   - Uses the ship's class to determine number of dice (sloops get more dice)
+   - Each success adds to the ship's evasion rating
+   - Evasion rating reduces damage from attacks
+
+3. **Repair**: Fix damage to the ship
+   - Base 1 die for repairs
+   - Surgeon crew role adds additional dice
+   - Each success restores 5 HP to the ship
+   - Cannot exceed ship's maximum durability
+
+## Dice Mechanics
+
+The combat system uses a dice pool mechanic based on Forged in the Dark:
+
+- Actions roll a number of six-sided dice (d6) based on ship stats, crew, and modifiers
+- Results are categorized:
+  - 6: Full success
+  - 4-5: Partial success
+  - 1-3: Failure
+- Outcome is determined by the highest die result, not the sum:
+  - If any die shows 6, it's a success
+  - If multiple dice show 6, it's a critical success
+  - If the highest die is 4-5, it's a partial success
+  - If no die shows 4+, it's a failure
+- Each outcome level has different effects:
+  - Critical Success: Maximum effect (e.g., 3 damage, 15 HP repair)
+  - Success: Strong effect (e.g., 2 damage, 10 HP repair)
+  - Partial Success: Minimal effect (e.g., 1 damage, 5 HP repair)
+  - Failure: No effect
+
+### Modifiers
+
+The system supports modifiers that add or remove dice from action rolls:
+
+- Positive modifiers add dice to the roll (e.g., "+1 die from Point Blank Range")
+- Negative modifiers remove dice (e.g., "-2 dice from Target Evading")
+- If the total dice count is reduced to 0 or negative, you roll 2 dice and take the worst (lowest) result
+- Modifiers can be temporary (one-time use) or persistent (lasting until cleared)
+
+### Action Types with Modifiers
+
+1. **Fire Cannons**:
+   - Base dice from ship's firepower attribute
+   - +1 die for Point Blank Range (adjacent hex)
+   - Negative dice equal to target's evade score
+
+2. **Evade**:
+   - Base dice from ship's class (sloop=3, brigantine=2, galleon=1)
+   - Result sets ship's evade score until next turn
+   - Evade score reduces attacker's dice when ship is targeted
+
+3. **Repair**:
+   - Base 1 die
+   - Surgeon crew member adds dice equal to their skill level
+
+## Game Flow
+
+1. **Combat Initialization**:
+   - Player and enemy ships are placed on the grid
+   - Ships are given initial stats based on their class
+   - Crew points are allocated based on crew size for the player and ship class for enemies
+
+2. **Turn Structure**:
+   - Each turn consists of a movement phase and an action phase
+   - During movement phase, players can move their ship based on speed
+   - During action phase, players can perform multiple actions based on crew points
+
+3. **Movement Phase**:
+   - Player selects their ship and can move to valid hexes
+   - Movement is limited by the ship's speed stat
+   - Cannot move through occupied hexes
+
+4. **Action Phase**:
+   - Player spends crew points to perform actions
+   - Actions have different costs:
+     - Fire Cannons: 1 CP
+     - Evade: 1 CP
+     - Repair: 2 CP
+   - Multiple actions can be performed as long as crew points are available
+   - Action results are calculated using dice rolls
+   - Enemy AI takes its turn after the player
+
+5. **End of Turn**:
+   - Crew points are replenished for the next turn
+   - Movement points are reset
+
+6. **Combat Resolution**:
+   - Combat ends when one ship is destroyed (0 durability)
+   - Player can also retreat from battle
+
+## Crew Point System
+
+The crew point system connects ship crew size to combat actions:
+
+- Each ship has a maximum number of crew points equal to its crew size
+- The player's ship CP is based on the number of crew members
+- Enemy ships' CP is based on their class (sloop=2, brigantine=4, galleon=6)
+- Crew points are spent to perform actions during the action phase
+- This creates an action economy where players must decide which actions are most important
+- Larger ships with more crew can perform more actions each turn
+- Creates a strategic layer where ship size and crew complement affect combat capability
+
+## Future Enhancements
+
+1. **Ship Orientation**: Implement proper ship orientation and rotation
+2. **Wind Effects**: Integrate with the wind system for movement modifiers
+3. **Boarding**: Add boarding mechanics for crew-vs-crew combat
+4. **Visual Improvements**: Add proper ship sprites and battle animations
+5. **Advanced Actions**: Ram, board, special abilities
+6. **Crew Integration**: Deeper crew role impacts on combat
 
 ## docs/CrewSystem.md
 # Crew System Documentation
@@ -3525,10 +6996,10 @@ Description: A versatile, mid-sized ship that balances speed and strength.
 Suitable for a wide range of pirate activities.
 Hex Size and Shape: 2 hexes in a straight line, sleek and narrow.
 Stats:
-Speed: 2 hexes per turn (3 with favorable wind)
-Firepower: 6 cannons (3 dice per attack)
+Speed: 2 hexes per turn (Movement Phase)
+Firepower Dice: 3 dice per 'Fire Cannons' action. (Aligned with Design Doc) (Actual cannons: 6)
 Durability: 20 HP
-Crew Capacity: 8 members
+Crew Capacity: 8 members (Max 8 CP per turn) (Added CP link)
 Tactical Role: A jack-of-all-trades ship, capable of raiding, boarding, or 
 engaging in sustained combat.
 Flavor: A weathered vessel with a history of battles, its deck adorned 
@@ -3541,10 +7012,10 @@ kite shape provides a broad profile for devastating broadsides.
 Hex Size and Shape: 4 hexes in a kite arrangement (1 hex bow, 2 hexes 
 midship, 1 hex stern), wide and imposing.
 Stats:
-Speed: 1 hex per turn (2 with favorable wind)
-Firepower: 12 cannons (6 dice per attack)
+Speed: 1 hex per turn (Movement Phase)
+Firepower Dice: 6 dice per 'Fire Cannons' action. (Aligned with Design Doc) (Actual cannons: 12)
 Durability: 40 HP
-Crew Capacity: 12 members
+Crew Capacity: 12 members (Max 12 CP per turn) (Added CP link)
 Tactical Role: A slow but powerful ship that excels in head-on combat and 
 intimidation. Requires careful positioning due to its size.
 Flavor: An ornate, battle-scarred behemoth, its deck laden with gold and 
@@ -3568,7 +7039,7 @@ Upgrades: Players can enhance speed, firepower, or durability within each
 class to suit their playstyle.
 5. Mechanics Deep Dive
 5.1 Crew System
-Crew Roles: Navigator, Gunner, Surgeon, etc., boosting specific actions.
+Crew Roles: Navigator, Gunner, Surgeon, etc., boosting specific actions (e.g., Navigator reduces travel time, Surgeon adds dice to Repair, Gunner adds dice to Fire Cannons). (Added Gunner effect intent)
 Character Sheet:
 Role: Defines specialty.
 Skill Level: 1-5, adding dice/bonuses to rolls.
@@ -3578,7 +7049,7 @@ Health: Hit points; injuries occur in combat.
 Boon/Bane: One positive trait (e.g., “Sharp-Eyed”) and one negative (e.g., 
 “Cursed”).
 Recruitment: Found in taverns or via quests; elite crew require high 
-reputation.
+reputation. Hiring costs gold. (Clarified hiring cost)
 5.2 Item System
 Types:
 Resources: Bulk goods (e.g., rum, timber) tracked numerically.
@@ -3597,8 +7068,8 @@ Impact: Affects opportunities, crew recruitment, and events.
 5.4 Passage of Time
 Timeline: 72 weeks, with the earthquake striking randomly between weeks 
 60-72.
-At Sea: Zone movement or major actions cost 1 week.
-In Port: Actions take 1-3 weeks (e.g., 1 for repairs, 2 for investments).
+At Sea: Zone movement costs time (base 1 week, modified by wind/crew). Major actions like specific exploration events might cost time. Combat itself does not advance the week counter, but initiating it might if tied to an action. (Clarified time costs)
+In Port: Actions take 1-3 weeks (e.g., 1 for basic repairs, 2 for investments, 1 for recruiting). (Confirmed port time costs)
 Hints: NPC rumors and tremors escalate as the quake approaches.
 5.5 Economic Systems
 Trade Routes: Buy low, sell high across ports with dynamic pricing.
@@ -3615,9 +7086,9 @@ Purpose: A streamlined hub for management and prep with flavorful
 immersion.
 7. Combat System
 Hex Grid: 10x10 hexes; ships sized 1-4 hexes based on class.
-Movement: Varies by ship class (see "Ship Classes").
-Actions: Two per turn (movement + combat/utility).
-Dice Pools: 1-5 d6s for attacks, evasion, etc.
+Turn Structure: Movement Phase (spend move points based on Speed) followed by Action Phase (spend Crew Points). (Aligned with Section 3.1)
+Actions: Core actions (Fire, Evade, Repair) cost CP (1/1/2 respectively). Others TBD. (Aligned with Section 3.1)
+Dice Pools: 1-5 d6s for attacks, evasion, etc., based on ship, crew (e.g., Gunner skill for Fire, Surgeon for Repair), and context. (Added crew skill links)
 Boarding Actions: Side-view crew combat.
 8. Modular Systems
 Ship Customization: Hulls, sails, cannons with unique stats (e.g., speed, 
@@ -3891,9 +7362,2311 @@ Pokemon, Fire Emblem, and Golden Sun for inspiration on how to work around low-r
 
 ## ./codebase_dump.md
 # PortRoyal Codebase Dump
-Generated: Wed Mar 26 23:42:26 CDT 2025
+Generated: Sat Mar 29 16:41:44 CDT 2025
 
 # Source Code
+
+## src/combat.lua
+```lua
+-- Combat System Module for Naval Battles
+-- Implements a hex grid battlefield and ship combat mechanics
+
+-- Import dice system
+local diceModule = require('dice')
+local diceSystem = diceModule.dice
+local Modifier = diceModule.Modifier
+
+-- Import ship utils
+local shipUtils = require('utils.shipUtils')
+
+-- Import constants
+local Constants = require('constants')
+
+local Combat = {
+    -- Constants for the hex grid
+    GRID_SIZE = Constants.COMBAT.GRID_SIZE,
+    HEX_RADIUS = Constants.UI.COMBAT.HEX_RADIUS,
+    HEX_HEIGHT = nil, -- Will be calculated based on radius
+    HEX_WIDTH = nil,  -- Will be calculated based on radius
+    
+    -- Grid display properties
+    gridOffsetX = Constants.UI.SCREEN_WIDTH / 2,  -- Position of grid on screen - will be centered
+    gridOffsetY = 235,  -- Will be dynamically adjusted based on UI layout
+    
+    -- State variables for the battle
+    hoveredHex = nil,   -- Currently hovered hex coordinates {q, r}
+    selectedHex = nil,  -- Currently selected hex coordinates
+    validMoves = {},    -- Valid move targets for selected ship
+    
+    -- Active battle data (will be stored in gameState.combat)
+    -- Included here as reference/documentation
+    --[[
+    battle = {
+        grid = {}, -- 2D array representing the hex grid
+        playerShip = {
+            class = "sloop",  -- Ship class (sloop, brigantine, galleon)
+            size = 1,         -- Number of hexes occupied
+            position = {5, 5}, -- {q, r} coordinates on grid
+            orientation = 0,   -- Direction ship is facing (0-5, representing 60° increments)
+            movesRemaining = 3 -- Based on ship speed
+        },
+        enemyShip = {
+            class = "sloop",
+            size = 1,
+            position = {2, 2},
+            orientation = 3,
+            movesRemaining = 3
+        },
+        turn = "player", -- Who's turn is it (player or enemy)
+        phase = "movement", -- Current phase (movement, attack, etc.)
+    }
+    --]]
+    
+    -- Action costs in crew points
+    actionCosts = {
+        fire = Constants.COMBAT.CP_COST_FIRE,     -- Fire Cannons costs
+        evade = Constants.COMBAT.CP_COST_EVADE,   -- Evade costs
+        repair = Constants.COMBAT.CP_COST_REPAIR  -- Repair costs (more labor intensive)
+    },
+    
+    -- Ship definitions for the hex grid (size, shape, movement patterns)
+    shipDefinitions = {
+        sloop = {
+            hexSize = 1,    -- Occupies 1 hex
+            shape = {{0, 0}}, -- Relative {q, r} coordinates for each hex
+            anchorOffset = {0, 0} -- Anchor point offset for sprite positioning
+        },
+        brigantine = {
+            hexSize = 2,    -- Occupies 2 hexes
+            -- Represents a ship that occupies 2 hexes in a line
+            shape = {{0, 0}, {1, 0}}, -- Relative coordinates from anchor point
+            anchorOffset = {0.5, 0} -- Anchor point is between the two hexes
+        },
+        galleon = {
+            hexSize = 4,    -- Occupies 4 hexes
+            -- Kite shape with 1 hex bow, 2 hex midship, 1 hex stern
+            shape = {{0, 0}, {0, 1}, {1, 0}, {-1, 0}}, -- Relative coordinates from anchor point
+            anchorOffset = {0, 0.5} -- Anchor point is in the middle of the kite shape
+        }
+    }
+}
+
+-- Initialize the combat system
+function Combat:load(gameState)
+    -- Calculate hex dimensions for drawing
+    -- For pointy-top hexagons
+    self.HEX_WIDTH = self.HEX_RADIUS * 2
+    self.HEX_HEIGHT = math.sqrt(3) * self.HEX_RADIUS
+    
+    -- Create combat state in gameState if it doesn't exist
+    if not gameState.combat then
+        gameState.combat = {}
+    end
+    
+    -- Load ship sprite assets
+    local AssetUtils = require('utils.assetUtils')
+    self.shipSprites = {
+        sloop = AssetUtils.loadImage("assets/sloop-top-down.png", "ship"),
+        brigantine = AssetUtils.loadImage("assets/brigantine-top-down.png", "ship"),
+        galleon = nil -- Placeholder for future galleon sprite
+    }
+    
+    -- Initialize the dice system
+    self:initDiceSystem()
+    
+    -- Debug feature - enable with F9 key in debug mode
+    self.showDebugHitboxes = false
+    
+    print("Combat system initialized")
+    print("Hex dimensions: " .. self.HEX_WIDTH .. "x" .. self.HEX_HEIGHT)
+end
+
+-- Initialize a new battle
+function Combat:initBattle(gameState, enemyShipClass)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:initBattle")
+    assert(gameState.ship, "gameState.ship is required for Combat:initBattle")
+    assert(gameState.ship.class, "gameState.ship.class is required for Combat:initBattle")
+    
+    -- Validate enemyShipClass if provided
+    if enemyShipClass and not self.shipDefinitions[enemyShipClass] then
+        print("WARNING: Unknown enemy ship class: " .. tostring(enemyShipClass) .. ". Defaulting to sloop.")
+        enemyShipClass = "sloop"
+    end
+    
+    -- Create a new grid
+    local grid = self:createEmptyGrid()
+    
+    -- Configure player ship based on gameState
+    local playerShipClass = gameState.ship.class
+    local playerShipSpeed = shipUtils.getBaseSpeed(playerShipClass)
+    
+    -- Create battle state
+    local battle = {
+        grid = grid,
+        playerShip = {
+            class = playerShipClass,
+            size = self.shipDefinitions[playerShipClass].hexSize,
+            position = {2, 8}, -- Bottom-left area
+            orientation = 0,   -- North-facing to start
+            movesRemaining = playerShipSpeed,
+            evadeScore = 0,    -- Evade score (reduces attacker's dice)
+            hasActed = false,  -- Whether ship has performed an action this turn
+            modifiers = {},    -- Active modifiers
+            crewPoints = gameState.crew.members and #gameState.crew.members or 1, -- Available crew points for actions
+            maxCrewPoints = gameState.crew.members and #gameState.crew.members or 1  -- Maximum crew points per turn
+        },
+        enemyShip = {
+            class = enemyShipClass or "sloop", -- Default to sloop if not specified
+            size = self.shipDefinitions[enemyShipClass or "sloop"].hexSize,
+            position = {7, 1}, -- Top-right area
+            orientation = 3,   -- South-facing to start
+            movesRemaining = shipUtils.getBaseSpeed(enemyShipClass or "sloop"),
+            durability = shipUtils.getMaxHP(enemyShipClass or "sloop"), -- Set HP based on ship class
+            evadeScore = 0,    -- Evade score (reduces attacker's dice)
+            hasActed = false,  -- Whether ship has performed an action this turn
+            modifiers = {},    -- Active modifiers
+            crewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop"), -- Based on ship class
+            maxCrewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop")
+        },
+        turn = "player",
+        phase = "movement",
+        actionResult = nil,    -- Stores result of the last action
+        turnCount = 1          -- Track number of turns
+    }
+    
+    -- Place ships on the grid
+    self:placeShipOnGrid(battle.grid, battle.playerShip, battle)
+    self:placeShipOnGrid(battle.grid, battle.enemyShip, battle)
+    
+    -- Store battle in gameState
+    gameState.combat = battle
+    
+    print("New naval battle initialized: " .. playerShipClass .. " vs " .. (enemyShipClass or "sloop"))
+    return battle
+end
+
+-- Create an empty hex grid
+function Combat:createEmptyGrid()
+    local grid = {}
+    for q = 0, self.GRID_SIZE - 1 do
+        grid[q] = {}
+        for r = 0, self.GRID_SIZE - 1 do
+            grid[q][r] = {
+                ship = nil,     -- Reference to ship in this hex
+                isPlayerShip = false, -- Flag for player ship
+                isEnemyShip = false,  -- Flag for enemy ship
+                content = "empty" -- Can be "empty", "ship", or other battlefield elements
+            }
+        end
+    end
+    return grid
+end
+
+-- Place a ship on the grid
+function Combat:placeShipOnGrid(grid, ship, battle)
+    local q, r = ship.position[1], ship.position[2]
+    local shape = self.shipDefinitions[ship.class].shape
+    
+    -- Transform shape based on orientation
+    local transformedShape = self:transformShapeByOrientation(shape, ship.orientation)
+    
+    -- Place the ship on each relevant hex
+    for _, offset in ipairs(transformedShape) do
+        local hexQ = q + offset[1]
+        local hexR = r + offset[2]
+        
+        -- Check if within grid bounds
+        if hexQ >= 0 and hexQ < self.GRID_SIZE and hexR >= 0 and hexR < self.GRID_SIZE then
+            grid[hexQ][hexR].ship = ship
+            grid[hexQ][hexR].content = "ship"
+            
+            -- Mark as player or enemy ship
+            if ship == battle.playerShip then
+                grid[hexQ][hexR].isPlayerShip = true
+            else
+                grid[hexQ][hexR].isEnemyShip = true
+            end
+        else
+            print("Warning: Ship placement outside grid bounds: " .. hexQ .. "," .. hexR)
+        end
+    end
+end
+
+-- Transform a ship's shape based on orientation (0-5 for 60° increments)
+function Combat:transformShapeByOrientation(shape, orientation)
+    local transformed = {}
+    
+    -- Apply rotation based on orientation
+    for _, hex in ipairs(shape) do
+        local q, r = hex[1], hex[2]
+        local newQ, newR
+        
+        -- Hex grid rotation formulas
+        if orientation == 0 then      -- 0° (North)
+            newQ, newR = q, r
+        elseif orientation == 1 then  -- 60° (Northeast)
+            newQ, newR = q + r, -q
+        elseif orientation == 2 then  -- 120° (Southeast)
+            newQ, newR = -r, q + r
+        elseif orientation == 3 then  -- 180° (South)
+            newQ, newR = -q, -r
+        elseif orientation == 4 then  -- 240° (Southwest)
+            newQ, newR = -q - r, q
+        elseif orientation == 5 then  -- 300° (Northwest)
+            newQ, newR = r, -q - r
+        end
+        
+        table.insert(transformed, {newQ, newR})
+    end
+    
+    return transformed
+end
+
+-- Get the hex at screen coordinates (x,y)
+function Combat:getHexFromScreen(x, y)
+    -- Approach: Find the closest hex center for maximum precision
+    local closestHex = nil
+    local minDistance = math.huge
+    
+    -- Try all grid hexes (brute force approach to guarantee accuracy)
+    for q = 0, self.GRID_SIZE - 1 do
+        for r = 0, self.GRID_SIZE - 1 do
+            -- Get hex center in pixel coordinates
+            local hexX, hexY = self:hexToScreen(q, r)
+            
+            -- Calculate distance from mouse to hex center
+            local dx = x - hexX
+            local dy = y - hexY
+            local dist = math.sqrt(dx*dx + dy*dy)
+            
+            -- Check if this is in the hex (hexagons have radius = self.HEX_RADIUS)
+            if dist <= self.HEX_RADIUS then
+                -- Inside this hex - return immediately
+                return {q, r}
+            end
+            
+            -- Otherwise track the closest hex
+            if dist < minDistance then
+                minDistance = dist
+                closestHex = {q, r}
+            end
+        end
+    end
+    
+    -- If mouse is close enough to the grid, return the closest hex
+    if minDistance < self.HEX_RADIUS * 2 then
+        return closestHex
+    end
+    
+    -- Mouse is too far from any hex
+    return nil
+end
+
+-- Round floating point hex coordinates to the nearest hex
+function Combat:roundHexCoord(q, r)
+    local s = -q - r
+    local rq = math.round(q)
+    local rr = math.round(r)
+    local rs = math.round(s)
+    
+    local qDiff = math.abs(rq - q)
+    local rDiff = math.abs(rr - r)
+    local sDiff = math.abs(rs - s)
+    
+    if qDiff > rDiff and qDiff > sDiff then
+        rq = -rr - rs
+    elseif rDiff > sDiff then
+        rr = -rq - rs
+    end
+    
+    return {rq, rr}
+end
+
+-- Helper function for Lua that mimics the math.round function from other languages
+function math.round(x)
+    return x >= 0 and math.floor(x + 0.5) or math.ceil(x - 0.5)
+end
+
+-- Get neighbors of a hex
+function Combat:getHexNeighbors(q, r)
+    local neighbors = {}
+    
+    -- Define different neighbors for even and odd rows in offset coordinates
+    if r % 2 == 0 then
+        -- Even row neighbors
+        neighbors = {
+            {q+1, r}, {q, r-1}, {q-1, r-1},
+            {q-1, r}, {q-1, r+1}, {q, r+1}
+        }
+    else
+        -- Odd row neighbors
+        neighbors = {
+            {q+1, r}, {q+1, r-1}, {q, r-1},
+            {q-1, r}, {q, r+1}, {q+1, r+1}
+        }
+    end
+    
+    -- Filter neighbors to ensure they're within grid bounds
+    local validNeighbors = {}
+    for _, neighbor in ipairs(neighbors) do
+        local nq, nr = neighbor[1], neighbor[2]
+        if nq >= 0 and nq < self.GRID_SIZE and nr >= 0 and nr < self.GRID_SIZE then
+            table.insert(validNeighbors, neighbor)
+        end
+    end
+    
+    return validNeighbors
+end
+
+-- Calculate valid moves for a ship from its current position
+function Combat:calculateValidMoves(battle, ship)
+    local q, r = ship.position[1], ship.position[2]
+    local movesRemaining = ship.movesRemaining
+    local validMoves = {}
+    
+    -- Use a breadth-first search to find all reachable hexes
+    local queue = {{q, r, 0}} -- {q, r, distance}
+    local visited = {[q .. "," .. r] = true}
+    
+    while #queue > 0 do
+        local current = table.remove(queue, 1)
+        local cq, cr, distance = current[1], current[2], current[3]
+        
+        if distance > 0 and distance <= movesRemaining then
+            table.insert(validMoves, {cq, cr})
+        end
+        
+        -- Only explore neighbors if within movement range
+        if distance < movesRemaining then
+            local neighbors = self:getHexNeighbors(cq, cr)
+            for _, neighbor in ipairs(neighbors) do
+                local nq, nr = neighbor[1], neighbor[2]
+                local key = nq .. "," .. nr
+                
+                -- Skip if already visited
+                if not visited[key] then
+                    -- Skip if occupied by a ship
+                    if battle.grid[nq][nr].content ~= "ship" then
+                        visited[key] = true
+                        table.insert(queue, {nq, nr, distance + 1})
+                    end
+                end
+            end
+        end
+    end
+    
+    return validMoves
+end
+
+-- Move a ship to a new position
+function Combat:moveShip(battle, ship, newQ, newR)
+    -- Store old position for distance calculation
+    local oldQ, oldR = ship.position[1], ship.position[2]
+    
+    -- Clear ship from old position
+    for q = 0, self.GRID_SIZE - 1 do
+        for r = 0, self.GRID_SIZE - 1 do
+            if battle.grid[q][r].ship == ship then
+                battle.grid[q][r].ship = nil
+                battle.grid[q][r].content = "empty"
+                battle.grid[q][r].isPlayerShip = false
+                battle.grid[q][r].isEnemyShip = false
+            end
+        end
+    end
+    
+    -- Update ship position
+    ship.position = {newQ, newR}
+    
+    -- Place ship at new position
+    self:placeShipOnGrid(battle.grid, ship, battle)
+    
+    -- Update moves remaining
+    local distance = self:hexDistance(oldQ, oldR, newQ, newR)
+    ship.movesRemaining = ship.movesRemaining - distance
+    
+    return true
+end
+
+-- Calculate distance between two hexes in the offset coordinate system
+function Combat:hexDistance(q1, r1, q2, r2)
+    -- Convert from offset coordinates to cube coordinates
+    local x1, y1, z1 = self:offsetToCube(q1, r1)
+    local x2, y2, z2 = self:offsetToCube(q2, r2)
+    
+    -- Use cube coordinate distance formula
+    return math.max(math.abs(x1 - x2), math.abs(y1 - y2), math.abs(z1 - z2))
+end
+
+-- Convert offset coordinates to cube coordinates
+function Combat:offsetToCube(q, r)
+    local parity = r % 2  -- r mod 2, gives 0 for even rows and 1 for odd rows
+    local x = q - (r - parity) / 2
+    local z = r
+    local y = -x - z
+    return x, y, z
+end
+
+-- Convert hex coordinates to screen coordinates
+function Combat:hexToScreen(q, r)
+    -- For pointy-top hexagons
+    local hexWidth = self.HEX_RADIUS * math.sqrt(3)
+    local hexHeight = self.HEX_RADIUS * 2
+    
+    -- Calculate the total grid size in pixels
+    -- For a pointy-top hex grid with brick layout pattern
+    local gridWidthInHexes = self.GRID_SIZE
+    local gridHeightInHexes = self.GRID_SIZE
+    
+    -- Total width = width of a column of hexes * number of columns
+    local totalGridWidth = hexWidth * gridWidthInHexes
+    -- Total height = height of a hex * number of rows, accounting for overlap
+    local totalGridHeight = hexHeight * 0.75 * gridHeightInHexes + hexHeight * 0.25
+    
+    -- Make sure we have proper grid center coordinates
+    -- This should be exactly the center of the available play area
+    local centerX = self.gridOffsetX
+    local centerY = self.gridOffsetY
+    
+    -- Calculate grid origin (top-left corner of the hex grid itself)
+    -- This centers the actual hex grid within whatever panel is showing it
+    local gridOriginX = centerX - (totalGridWidth / 2)
+    local gridOriginY = centerY - (totalGridHeight / 2)
+    
+    -- Calculate the position for this specific hex
+    local hexX = gridOriginX + (q * hexWidth)
+    local hexY = gridOriginY + (r * hexHeight * 0.75)
+    
+    -- Apply horizontal offset for odd rows (brick pattern layout)
+    if r % 2 == 1 then
+        hexX = hexX + (hexWidth / 2)
+    end
+    
+    return hexX, hexY
+end
+
+-- Update combat state
+function Combat:update(dt, gameState)
+    if not gameState.combat then return end
+    
+    local battle = gameState.combat
+    
+    -- Update game logic here
+    -- For now, we're just focusing on the movement mechanics
+end
+
+-- Draw the hex grid and ships
+function Combat:draw(gameState)
+    if not gameState.combat then return end
+    
+    local battle = gameState.combat
+    
+    -- Define fixed UI layout constants for our 800x600 reference resolution
+    local SCREEN_WIDTH = 800
+    local SCREEN_HEIGHT = 600
+    local TOP_BAR_HEIGHT = 30     -- Reduced height for top status bar
+    local BOTTOM_BAR_HEIGHT = 80  -- Height for action buttons and instructions
+    
+    -- Calculate available space for the battle grid
+    -- Move grid up slightly to make more room for action feedback panel
+    local GRID_TOP = TOP_BAR_HEIGHT + 5  -- Reduced top margin
+    local GRID_BOTTOM = SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT - 15 -- Added more space at bottom
+    local GRID_HEIGHT = GRID_BOTTOM - GRID_TOP
+    
+    -- Define sidebar width
+    local sidebarWidth = 140
+    
+    -- Calculate true hex dimensions for a pointy-top hex
+    local hexWidth = self.HEX_RADIUS * math.sqrt(3)
+    local hexHeight = self.HEX_RADIUS * 2
+    
+    -- Calculate the total grid dimensions more accurately
+    -- For a pointy-top hex grid with brick layout pattern
+    local totalGridWidth = hexWidth * self.GRID_SIZE
+    local totalGridHeight = (hexHeight * 0.75 * self.GRID_SIZE) + (hexHeight * 0.25)
+    
+    -- Store dimensions for other methods
+    self.gridScreenHeight = GRID_HEIGHT
+    self.gridScreenWidth = totalGridWidth
+    
+    -- Define available center area (excluding sidebars)
+    local availableWidth = SCREEN_WIDTH - (sidebarWidth * 2)
+    
+    -- Center coordinates of the play area (excluding sidebars)
+    local centerX = SCREEN_WIDTH / 2
+    local centerY = GRID_TOP + ((GRID_BOTTOM - GRID_TOP) / 2)
+    
+    -- Store these coordinates for the grid drawing functions
+    self.gridOffsetX = centerX
+    self.gridOffsetY = centerY
+    
+    -- Save play area constants for other functions
+    self.layoutConstants = {
+        topBarHeight = TOP_BAR_HEIGHT,
+        gridTop = GRID_TOP,
+        gridBottom = GRID_BOTTOM,
+        sidebarWidth = sidebarWidth,
+        bottomBarHeight = BOTTOM_BAR_HEIGHT,
+        screenWidth = SCREEN_WIDTH,
+        screenHeight = SCREEN_HEIGHT,
+        availableWidth = availableWidth
+    }
+    
+    -- Draw background and grid
+    self:drawBackground(centerX, centerY, SCREEN_WIDTH, SCREEN_HEIGHT, gameState.settings.debug)
+    self:drawGridBackground(GRID_TOP, GRID_HEIGHT, sidebarWidth, availableWidth)
+    self:drawHexes(battle, gameState.settings.debug)
+    
+    -- Draw ships on top of hexes for better visibility
+    self:drawShips(battle)
+    
+    -- Draw UI elements using the layout constants
+    self:drawUI(gameState)
+    
+    -- Draw debug info if needed
+    if gameState.settings.debug then
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.print("Grid offset: " .. self.gridOffsetX .. ", " .. self.gridOffsetY, 10, 550)
+        love.graphics.print("Grid dims: " .. totalGridWidth .. "x" .. totalGridHeight, 10, 570)
+        love.graphics.print("Play area: " .. GRID_TOP .. "-" .. GRID_BOTTOM, 200, 570)
+    end
+end
+
+-- Draw the battle background
+function Combat:drawBackground(centerX, centerY, screenWidth, screenHeight, showDebug)
+    -- Draw the entire battle area background first
+    love.graphics.setColor(Constants.COLORS.UI_BACKGROUND) -- Very dark blue/black background
+    love.graphics.rectangle("fill", 0, 0, screenWidth, screenHeight)
+    
+    -- If debug mode is on, draw a small dot at the exact center for reference
+    if showDebug then
+        love.graphics.setColor(1, 0, 0, 0.8)
+        love.graphics.circle("fill", centerX, centerY, 3)
+    end
+end
+
+-- Draw the grid background (sea area)
+function Combat:drawGridBackground(gridTop, gridHeight, sidebarWidth, availableWidth)
+    -- Calculate grid background dimensions to fill available space between sidebars
+    local gridAreaWidth = availableWidth - 20  -- -20 for small margin on each side
+    local gridAreaHeight = gridHeight - 20    -- -20 for small margin on top and bottom
+    
+    -- Calculate the top-left corner of the grid background
+    local gridAreaX = sidebarWidth + 10 -- Left sidebar width + small margin
+    local gridAreaY = gridTop + 10     -- Top bar + small margin
+    
+    -- Draw grid background (sea)
+    love.graphics.setColor(Constants.COLORS.SEA) -- Dark blue water
+    love.graphics.rectangle("fill", 
+        gridAreaX, 
+        gridAreaY, 
+        gridAreaWidth, 
+        gridAreaHeight,
+        5, 5 -- Rounded corners
+    )
+    
+    -- Grid border
+    love.graphics.setColor(Constants.COLORS.SEA_BORDER) -- Lighter blue border
+    love.graphics.rectangle("line", 
+        gridAreaX, 
+        gridAreaY, 
+        gridAreaWidth, 
+        gridAreaHeight,
+        5, 5 -- Rounded corners
+    )
+end
+
+-- Draw grid hexes
+function Combat:drawHexes(battle, showDebug)
+    for q = 0, self.GRID_SIZE - 1 do
+        for r = 0, self.GRID_SIZE - 1 do
+            local x, y = self:hexToScreen(q, r)
+            
+            -- Determine hex color based on content
+            if battle.grid[q][r].isPlayerShip then
+                -- Green for player ship (more transparent)
+                love.graphics.setColor(Constants.COLORS.PLAYER_SHIP[1], Constants.COLORS.PLAYER_SHIP[2], 
+                                      Constants.COLORS.PLAYER_SHIP[3], 0.5)
+            elseif battle.grid[q][r].isEnemyShip then
+                -- Red for enemy ship (more transparent)
+                love.graphics.setColor(Constants.COLORS.ENEMY_SHIP[1], Constants.COLORS.ENEMY_SHIP[2], 
+                                      Constants.COLORS.ENEMY_SHIP[3], 0.5)
+            elseif self.hoveredHex and self.hoveredHex[1] == q and self.hoveredHex[2] == r then
+                love.graphics.setColor(Constants.COLORS.HOVER) -- Yellow for hover
+            elseif self.selectedHex and self.selectedHex[1] == q and self.selectedHex[2] == r then
+                love.graphics.setColor(Constants.COLORS.SELECTED) -- Cyan for selected
+            elseif self:isValidMove(q, r) then
+                love.graphics.setColor(Constants.COLORS.VALID_MOVE) -- Light blue for valid moves
+            else
+                love.graphics.setColor(Constants.COLORS.EMPTY_WATER) -- Blue for empty water
+            end
+            
+            -- Draw hex
+            self:drawHex(x, y)
+            
+            -- Draw grid coordinates for debugging
+            if showDebug then
+                love.graphics.setColor(1, 1, 1, 0.7)
+                love.graphics.print(q .. "," .. r, x - 10, y)
+            end
+        end
+    end
+end
+
+-- Draw a single hexagon at position x,y
+function Combat:drawHex(x, y)
+    local vertices = {}
+    for i = 0, 5 do
+        local angle = math.pi / 3 * i + math.pi / 6 -- Pointy-top orientation
+        table.insert(vertices, x + self.HEX_RADIUS * math.cos(angle))
+        table.insert(vertices, y + self.HEX_RADIUS * math.sin(angle))
+    end
+    
+    -- Fill hex
+    love.graphics.polygon("fill", vertices)
+    
+    -- Draw hex outline
+    love.graphics.setColor(1, 1, 1, 0.3)
+    love.graphics.polygon("line", vertices)
+end
+
+-- Check if hex coordinates are in the valid moves list
+function Combat:isValidMove(q, r)
+    for _, move in ipairs(self.validMoves) do
+        if move[1] == q and move[2] == r then
+            return true
+        end
+    end
+    return false
+end
+
+-- Draw ships with proper shapes and orientations
+function Combat:drawShips(battle)
+    -- Draw player ship
+    local playerShip = battle.playerShip
+    local pq, pr = playerShip.position[1], playerShip.position[2]
+    
+    -- Check if player ship is selected for movement
+    local isSelected = false
+    if self.selectedHex and 
+       self.selectedHex[1] == pq and 
+       self.selectedHex[2] == pr then
+        isSelected = true
+    end
+    
+    -- Draw player ship based on class using the multi-hex approach
+    self:drawShipByClass(playerShip, true, isSelected, battle)
+    
+    -- Draw enemy ship
+    local enemyShip = battle.enemyShip
+    
+    -- Draw enemy ship based on class using the multi-hex approach
+    self:drawShipByClass(enemyShip, false, false, battle)
+end
+
+-- Draw a ship with appropriate shape based on class and orientation
+-- This is the main function for drawing ships on the combat grid
+function Combat:drawShipByClass(ship, isPlayer, isSelected, battle)
+    local shipClass = ship.class
+    local orientation = ship.orientation
+    local anchorQ, anchorR = ship.position[1], ship.position[2]
+    local scale = 1.0
+    
+    -- Set base color based on player/enemy
+    local baseColor = isPlayer and Constants.COLORS.PLAYER_SHIP or Constants.COLORS.ENEMY_SHIP
+    local outlineColor = {1, 1, 1, 0.8}
+    
+    -- Get the ship's shape and transform it based on orientation
+    local shape = self.shipDefinitions[shipClass].shape
+    local transformedShape = self:transformShapeByOrientation(shape, orientation)
+    
+    -- Draw each hex that the ship occupies
+    for _, offset in ipairs(transformedShape) do
+        local hexQ = anchorQ + offset[1]
+        local hexR = anchorR + offset[2]
+        
+        -- Check if within grid bounds
+        if hexQ >= 0 and hexQ < self.GRID_SIZE and hexR >= 0 and hexR < self.GRID_SIZE then
+            -- Draw hex outline to indicate ship occupation
+            local hexX, hexY = self:hexToScreen(hexQ, hexR)
+            
+            -- Draw colored hex background for occupied hexes
+            local hexColor = isPlayer and {0.2, 0.8, 0.2, 0.3} or {0.8, 0.2, 0.2, 0.3}
+            love.graphics.setColor(hexColor)
+            self:drawHex(hexX, hexY)
+            
+            -- Draw hex border with ship color
+            love.graphics.setColor(baseColor[1], baseColor[2], baseColor[3], 0.7)
+            self:drawHexOutline(hexX, hexY)
+        end
+    end
+    
+    -- Calculate the ship's center position 
+    local anchorOffset = self.shipDefinitions[shipClass].anchorOffset or {0, 0}
+    local centerHexQ = anchorQ + anchorOffset[1]
+    local centerHexR = anchorR + anchorOffset[2]
+    local centerX, centerY = self:hexToScreen(centerHexQ, centerHexR)
+    
+    -- Draw the ship sprite at the center position
+    local sprite = self.shipSprites[shipClass]
+    
+    -- Angle based on orientation (60 degrees per orientation step)
+    local angle = orientation * math.pi / 3
+    
+    if sprite then
+        -- Draw the sprite with proper orientation and scale
+        love.graphics.setColor(1, 1, 1, 1)
+        
+        -- Scale the sprite to fit within the hex
+        local spriteWidth = sprite:getWidth()
+        local spriteHeight = sprite:getHeight()
+        local maxDimension = self.HEX_RADIUS * 1.5
+        
+        -- Calculate scale based on sprite size and hex size
+        local scaleX = maxDimension / spriteWidth
+        local scaleY = maxDimension / spriteHeight
+        local spriteScale = math.min(scaleX, scaleY) * scale
+        
+        -- Draw rotated sprite centered on the ship's position
+        love.graphics.draw(
+            sprite, 
+            centerX, centerY, 
+            angle, 
+            spriteScale, spriteScale, 
+            spriteWidth / 2, spriteHeight / 2
+        )
+    else
+        -- Use the fallback geometric shape rendering if sprite is missing
+        self:drawShipFallbackShape(centerX, centerY, shipClass, orientation, baseColor, outlineColor, scale)
+    end
+    
+    -- Ship sprite is already rotated to show orientation - no need for extra indicators
+    
+    -- Draw a selection indicator if the ship is selected
+    if isSelected then
+        -- Draw a highlight around the entire ship
+        for _, offset in ipairs(transformedShape) do
+            local hexQ = anchorQ + offset[1]
+            local hexR = anchorR + offset[2]
+            
+            if hexQ >= 0 and hexQ < self.GRID_SIZE and hexR >= 0 and hexR < self.GRID_SIZE then
+                local x, y = self:hexToScreen(hexQ, hexR)
+                love.graphics.setColor(1, 1, 0, 0.5) -- Yellow highlight
+                self:drawHexOutline(x, y)
+            end
+        end
+        
+        -- Draw a pulsing highlight effect on the anchor hex
+        local anchorX, anchorY = self:hexToScreen(anchorQ, anchorR)
+        local pulseScale = 1.0 + math.sin(love.timer.getTime() * 4) * 0.1
+        love.graphics.setColor(1, 1, 0, 0.7) -- Yellow highlight
+        love.graphics.circle("line", anchorX, anchorY, self.HEX_RADIUS * 0.5 * pulseScale)
+    end
+end
+
+-- Draw a hex outline without fill
+function Combat:drawHexOutline(x, y)
+    local vertices = {}
+    for i = 0, 5 do
+        local angle = math.pi / 3 * i + math.pi / 6 -- Pointy-top orientation
+        table.insert(vertices, x + self.HEX_RADIUS * math.cos(angle))
+        table.insert(vertices, y + self.HEX_RADIUS * math.sin(angle))
+    end
+    
+    -- Draw hex outline
+    love.graphics.polygon("line", vertices)
+end
+
+-- Draw a ship icon for UI elements like sidebars
+function Combat:drawShipIconForUI(x, y, shipClass, orientation, isPlayer, isSelected, scale)
+    -- Set default scale if not provided
+    scale = scale or 1.0
+    
+    -- Set base color based on player/enemy
+    local baseColor = isPlayer and Constants.COLORS.PLAYER_SHIP or Constants.COLORS.ENEMY_SHIP
+    local outlineColor = {1, 1, 1, 0.8}
+    
+    -- Draw the ship sprite at the center position if available
+    local sprite = self.shipSprites[shipClass]
+    
+    -- Angle based on orientation (60 degrees per orientation step)
+    local angle = orientation * math.pi / 3
+    
+    if sprite then
+        -- Draw the sprite with proper orientation and scale
+        love.graphics.setColor(1, 1, 1, 1)
+        
+        -- Scale the sprite to fit within the icon area
+        local spriteWidth = sprite:getWidth()
+        local spriteHeight = sprite:getHeight()
+        local maxDimension = self.HEX_RADIUS * 1.5 * scale
+        
+        -- Calculate scale based on sprite size and desired icon size
+        local scaleX = maxDimension / spriteWidth
+        local scaleY = maxDimension / spriteHeight
+        local spriteScale = math.min(scaleX, scaleY)
+        
+        -- Draw rotated sprite
+        love.graphics.draw(
+            sprite, 
+            x, y, 
+            angle, 
+            spriteScale, spriteScale, 
+            spriteWidth / 2, spriteHeight / 2
+        )
+    else
+        -- Use fallback geometric shape if sprite is missing
+        self:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, outlineColor, scale)
+    end
+    
+    -- Ship sprite is already rotated to show orientation
+    -- No need for additional direction indicators as the sprite rotation is sufficient
+    
+    -- Draw selection indicator if needed
+    if isSelected then
+        love.graphics.setColor(1, 1, 0, 0.7) -- Yellow highlight
+        love.graphics.circle("line", x, y, self.HEX_RADIUS * 0.8 * scale)
+    end
+end
+
+-- Fallback shape rendering for ships without sprites
+function Combat:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, outlineColor, scale)
+    -- Set default scale if not provided
+    scale = scale or 1.0
+    
+    -- Calculate ship points based on orientation
+    local points = {}
+    
+    if shipClass == "sloop" then
+        -- Simple triangular shape for sloop
+        local size = self.HEX_RADIUS * 0.7 * scale
+        
+        -- Define the triangle points based on orientation
+        if orientation == 0 then -- North
+            points = {
+                x, y - size,          -- Bow
+                x - size * 0.7, y + size * 0.5,  -- Port (left) corner
+                x + size * 0.7, y + size * 0.5   -- Starboard (right) corner
+            }
+        elseif orientation == 1 then -- Northeast
+            points = {
+                x + size * 0.87, y - size * 0.5,  -- Bow
+                x - size * 0.5, y - size * 0.87,  -- Port corner
+                x + size * 0.5, y + size * 0.87   -- Starboard corner
+            }
+        elseif orientation == 2 then -- Southeast
+            points = {
+                x + size * 0.87, y + size * 0.5,  -- Bow
+                x + size * 0.5, y - size * 0.87,  -- Port corner
+                x - size * 0.5, y + size * 0.87   -- Starboard corner
+            }
+        elseif orientation == 3 then -- South
+            points = {
+                x, y + size,          -- Bow
+                x + size * 0.7, y - size * 0.5,  -- Port corner
+                x - size * 0.7, y - size * 0.5   -- Starboard corner
+            }
+        elseif orientation == 4 then -- Southwest
+            points = {
+                x - size * 0.87, y + size * 0.5,  -- Bow
+                x + size * 0.5, y + size * 0.87,  -- Port corner
+                x - size * 0.5, y - size * 0.87   -- Starboard corner
+            }
+        elseif orientation == 5 then -- Northwest
+            points = {
+                x - size * 0.87, y - size * 0.5,  -- Bow
+                x - size * 0.5, y + size * 0.87,  -- Port corner
+                x + size * 0.5, y - size * 0.87   -- Starboard corner
+            }
+        end
+        
+        -- Draw the ship
+        love.graphics.setColor(baseColor)
+        love.graphics.polygon("fill", points)
+        love.graphics.setColor(outlineColor)
+        love.graphics.polygon("line", points)
+        
+    elseif shipClass == "brigantine" then
+        -- More complex rectangular shape for brigantine
+        local sizeX = self.HEX_RADIUS * 0.85 * scale
+        local sizeY = self.HEX_RADIUS * 0.5 * scale
+        
+        -- Create a rectangle and rotate it based on orientation
+        local points = {
+            -sizeX, -sizeY,   -- Top-left
+            sizeX, -sizeY,    -- Top-right
+            sizeX, sizeY,     -- Bottom-right
+            -sizeX, sizeY     -- Bottom-left
+        }
+        
+        -- Adjust rotation based on orientation
+        local angle = orientation * math.pi / 3
+        
+        -- Rotate and translate points
+        local rotatedPoints = {}
+        for i = 1, #points, 2 do
+            local px, py = points[i], points[i+1]
+            
+            -- Rotate
+            local rx = px * math.cos(angle) - py * math.sin(angle)
+            local ry = px * math.sin(angle) + py * math.cos(angle)
+            
+            -- Translate
+            rotatedPoints[i] = x + rx
+            rotatedPoints[i+1] = y + ry
+        end
+        
+        -- Draw the ship
+        love.graphics.setColor(baseColor)
+        love.graphics.polygon("fill", rotatedPoints)
+        love.graphics.setColor(outlineColor)
+        love.graphics.polygon("line", rotatedPoints)
+        
+    elseif shipClass == "galleon" then
+        -- Big ship with kite shape for galleon
+        local size = self.HEX_RADIUS * 0.9 * scale
+        
+        -- Kite shape points
+        local points = {
+            0, -size,        -- Top (bow)
+            size/2, 0,       -- Right (midship)
+            0, size,         -- Bottom (stern)
+            -size/2, 0       -- Left (midship)
+        }
+        
+        -- Adjust rotation based on orientation
+        local angle = orientation * math.pi / 3
+        
+        -- Rotate and translate points
+        local rotatedPoints = {}
+        for i = 1, #points, 2 do
+            local px, py = points[i], points[i+1]
+            
+            -- Rotate
+            local rx = px * math.cos(angle) - py * math.sin(angle)
+            local ry = px * math.sin(angle) + py * math.cos(angle)
+            
+            -- Translate
+            rotatedPoints[i] = x + rx
+            rotatedPoints[i+1] = y + ry
+        end
+        
+        -- Draw the galleon body
+        love.graphics.setColor(baseColor)
+        love.graphics.polygon("fill", rotatedPoints)
+        love.graphics.setColor(outlineColor)
+        love.graphics.polygon("line", rotatedPoints)
+    else
+        -- Fallback to simple circle for unknown ship types
+        love.graphics.setColor(baseColor)
+        love.graphics.circle("fill", x, y, self.HEX_RADIUS * 0.7 * scale)
+        love.graphics.setColor(outlineColor)
+        love.graphics.circle("line", x, y, self.HEX_RADIUS * 0.7 * scale)
+    end
+end
+
+-- Draw UI elements for the battle
+function Combat:drawUI(gameState)
+    local battle = gameState.combat
+    
+    -- Use layout constants from draw function
+    local layout = self.layoutConstants
+    if not layout then return end
+    
+    -- Calculate player/enemy stats
+    local playerMaxHP = shipUtils.getMaxHP(battle.playerShip.class)
+    local playerHP = gameState.ship.durability
+    local playerHP_Percent = playerHP / playerMaxHP
+    
+    local enemyMaxHP = shipUtils.getMaxHP(battle.enemyShip.class)
+    local enemyHP = battle.enemyShip.durability
+    local enemyHP_Percent = enemyHP / enemyMaxHP
+    
+    -- Draw top status bar
+    self:drawTopBar(battle, layout.screenWidth)
+    
+    -- Draw player and enemy sidebars
+    self:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, playerHP_Percent, layout)
+    self:drawEnemySidebar(battle, enemyHP, enemyMaxHP, enemyHP_Percent, layout)
+    
+    -- Draw action feedback panel if we have a result
+    local buttonsY = self:drawFeedbackPanel(battle, layout)
+    
+    -- Draw action buttons panel based on the game phase
+    self:drawActionPanel(battle, buttonsY, layout)
+    
+    -- Draw instructions panel
+    self:drawInstructionsPanel(battle, buttonsY, layout)
+end
+
+-- Draw the top status bar
+function Combat:drawTopBar(battle, screenWidth)
+    local topBarHeight = self.layoutConstants.topBarHeight
+    
+    -- Draw the panel background
+    self:drawUIPanel(0, 0, screenWidth, topBarHeight)
+    
+    -- Battle status indicator (left)
+    local statusColor = Constants.COLORS.PLAYER_SHIP -- Green for player turn
+    local statusText = "YOUR TURN"
+    if battle.turn ~= "player" then
+        statusColor = Constants.COLORS.ENEMY_SHIP -- Red for enemy turn
+        statusText = "ENEMY TURN"
+    end
+    
+    love.graphics.setColor(statusColor)
+    love.graphics.print(statusText, 20, 8)
+    
+    -- Phase indicator (center)
+    love.graphics.setColor(1, 1, 1, 0.9)
+    love.graphics.printf("PHASE: " .. battle.phase:upper(), 0, 8, screenWidth, "center")
+    
+    -- Turn counter (right)
+    love.graphics.setColor(1, 0.9, 0.3, 0.9) -- Yellow-gold for turn counter
+    love.graphics.print("TURN: " .. battle.turnCount, screenWidth - 80, 8)
+end
+
+-- Draw the player's sidebar
+function Combat:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, playerHP_Percent, layout)
+    local gridTop = layout.gridTop
+    local gridBottom = layout.gridBottom
+    local sidebarWidth = layout.sidebarWidth
+    
+    -- Draw the sidebar panel
+    self:drawUIPanel(5, gridTop, sidebarWidth - 10, gridBottom - gridTop)
+    
+    -- Player ship title with class icon
+    love.graphics.setColor(0.2, 0.7, 0.9, 1) -- Blue for player
+    love.graphics.print("YOUR SHIP", 15, gridTop + 10)
+    love.graphics.print(string.upper(battle.playerShip.class), 15, gridTop + 30)
+    
+    -- Ship type icon or simple ship silhouette
+    self:drawShipIconForUI(75, gridTop + 65, battle.playerShip.class, 0, true, false, 0.8)
+    
+    -- Draw player ship HP bar
+    love.graphics.setColor(Constants.COLORS.UI_TEXT)
+    love.graphics.print("DURABILITY:", 15, gridTop + 120)
+    self:drawProgressBar(15, gridTop + 140, sidebarWidth - 30, 16, playerHP_Percent, Constants.COLORS.HEALTH, Constants.COLORS.DAMAGE)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(playerHP .. "/" .. playerMaxHP, 50, gridTop + 142)
+    
+    -- Draw moves or crew points based on phase
+    if battle.phase == "movement" then
+        self:drawMovementInfo(battle.playerShip, gridTop, sidebarWidth)
+    else
+        self:drawCrewPointsInfo(battle.playerShip, gridTop, sidebarWidth)
+    end
+    
+    -- Draw evade score if active
+    if battle.playerShip.evadeScore > 0 then
+        love.graphics.setColor(0.3, 0.8, 0.9, 1)
+        love.graphics.print("EVADE SCORE: " .. battle.playerShip.evadeScore, 15, gridTop + 210)
+    end
+    
+    -- Draw week counter at bottom of player panel
+    love.graphics.setColor(0.8, 0.8, 0.8, 0.7)
+    love.graphics.print("WEEK: " .. gameState.time.currentWeek, 15, gridBottom - 30)
+end
+
+-- Draw movement info for a ship
+function Combat:drawMovementInfo(ship, gridTop, sidebarWidth)
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("MOVEMENT:", 15, gridTop + 165)
+    local baseSpeed = shipUtils.getBaseSpeed(ship.class)
+    local movePercent = ship.movesRemaining / baseSpeed
+    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, movePercent, Constants.COLORS.BUTTON_EVADE, Constants.COLORS.UI_BORDER)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(ship.movesRemaining .. "/" .. baseSpeed, 50, gridTop + 187)
+end
+
+-- Draw crew points info for a ship
+function Combat:drawCrewPointsInfo(ship, gridTop, sidebarWidth)
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("CREW POINTS:", 15, gridTop + 165)
+    local cpPercent = ship.crewPoints / ship.maxCrewPoints
+    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, cpPercent, Constants.COLORS.GOLD, {0.5, 0.4, 0.1, 1})
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(ship.crewPoints .. "/" .. ship.maxCrewPoints, 50, gridTop + 187)
+end
+
+-- Draw the enemy sidebar
+function Combat:drawEnemySidebar(battle, enemyHP, enemyMaxHP, enemyHP_Percent, layout)
+    local gridTop = layout.gridTop
+    local gridBottom = layout.gridBottom
+    local sidebarWidth = layout.sidebarWidth
+    local screenWidth = layout.screenWidth
+    
+    -- Draw the sidebar panel
+    self:drawUIPanel(screenWidth - sidebarWidth + 5, gridTop, sidebarWidth - 10, gridBottom - gridTop)
+    
+    -- Enemy ship title
+    love.graphics.setColor(0.9, 0.3, 0.3, 1) -- Red for enemy
+    love.graphics.print("ENEMY SHIP", screenWidth - sidebarWidth + 15, gridTop + 10)
+    love.graphics.print(string.upper(battle.enemyShip.class), screenWidth - sidebarWidth + 15, gridTop + 30)
+    
+    -- Draw a simple ship outline based on class
+    self:drawShipIconForUI(screenWidth - sidebarWidth + 75, gridTop + 65, battle.enemyShip.class, 3, false, false, 0.8)
+    
+    -- Draw enemy ship HP bar
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("DURABILITY:", screenWidth - sidebarWidth + 15, gridTop + 120)
+    self:drawProgressBar(screenWidth - sidebarWidth + 15, gridTop + 140, sidebarWidth - 30, 16, 
+                        enemyHP_Percent, {0.2, 0.8, 0.2, 1}, {0.8, 0.2, 0.2, 1})
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(enemyHP .. "/" .. enemyMaxHP, screenWidth - sidebarWidth + 50, gridTop + 142)
+    
+    -- Draw enemy ship additional info
+    if battle.enemyShip.evadeScore > 0 then
+        love.graphics.setColor(0.9, 0.7, 0.3, 1)
+        love.graphics.print("EVADE SCORE: " .. battle.enemyShip.evadeScore, screenWidth - sidebarWidth + 15, gridTop + 165)
+    end
+end
+
+-- Draw the action feedback panel
+function Combat:drawFeedbackPanel(battle, layout)
+    local screenWidth = layout.screenWidth
+    local screenHeight = layout.screenHeight
+    local gridBottom = layout.gridBottom
+    local sidebarWidth = layout.sidebarWidth
+    local FEEDBACK_HEIGHT = Constants.UI.COMBAT.FEEDBACK_HEIGHT
+    local CONTROLS_HEIGHT = Constants.UI.COMBAT.CONTROLS_HEIGHT
+    local INSTRUCTIONS_HEIGHT = Constants.UI.COMBAT.INSTRUCTIONS_HEIGHT
+    
+    -- Will be set based on whether feedback is shown
+    local buttonsY = 0
+    
+    if battle.actionResult then
+        -- Position the feedback panel below the grid but keep room for buttons
+        local feedbackY = gridBottom + 5
+        
+        -- Make sure there's room for the feedback panel and buttons
+        local totalNeededHeight = FEEDBACK_HEIGHT + CONTROLS_HEIGHT + INSTRUCTIONS_HEIGHT + 10
+        local availableHeight = screenHeight - gridBottom - 5
+        
+        if totalNeededHeight > availableHeight then
+            -- Not enough space - make room by moving up
+            local extraNeeded = totalNeededHeight - availableHeight
+            feedbackY = feedbackY - extraNeeded
+        end
+        
+        -- Action result panel with translucent dark background
+        self:drawUIPanel(sidebarWidth + 5, feedbackY, screenWidth - (sidebarWidth * 2) - 10, FEEDBACK_HEIGHT)
+        
+        -- Draw the action result content
+        self:drawActionResultContent(battle.actionResult, feedbackY, sidebarWidth, screenWidth)
+        
+        buttonsY = feedbackY + FEEDBACK_HEIGHT + 5  -- Position buttons below feedback panel
+    else
+        -- If no feedback, buttons go at the bottom of the grid area
+        buttonsY = gridBottom + 5  -- Small gap between grid and buttons
+    end
+    
+    return buttonsY
+end
+
+-- Draw the content of the action result panel
+function Combat:drawActionResultContent(actionResult, feedbackY, sidebarWidth, screenWidth)
+    -- Action title
+    local title
+    -- Check if action was successful or failed due to lack of crew points
+    if actionResult.success == false then
+        -- Failed action due to insufficient crew points
+        title = actionResult.message
+        love.graphics.setColor(1, 0.3, 0.3, 1)  -- Red for error message
+    else
+        -- Successful action
+        if actionResult.action == "fire" then
+            love.graphics.setColor(0.9, 0.3, 0.3, 1) -- Red for attack
+            title = (actionResult.attacker == "player" and "YOU FIRED CANNONS" or "ENEMY FIRED CANNONS")
+            title = title .. " - DAMAGE: " .. actionResult.damage
+        elseif actionResult.action == "evade" then
+            love.graphics.setColor(0.3, 0.6, 0.9, 1) -- Blue for evade
+            title = (actionResult.ship == "player" and "YOU EVADED" or "ENEMY EVADED")
+            title = title .. " - EVADE SCORE: " .. actionResult.evadeScore
+        elseif actionResult.action == "repair" then
+            love.graphics.setColor(0.3, 0.9, 0.3, 1) -- Green for repair
+            title = (actionResult.ship == "player" and "YOU REPAIRED" or "ENEMY REPAIRED")
+            title = title .. " - HP RESTORED: " .. actionResult.repairAmount
+        end
+    end
+    
+    -- Display title centered at top of feedback panel
+    love.graphics.printf(title, sidebarWidth + 15, feedbackY + 10, screenWidth - (sidebarWidth * 2) - 30, "center")
+    
+    -- Skip dice display for failed actions
+    if actionResult.success == false then
+        -- No further content if it's just an error message
+        return
+    end
+    
+    -- Display dice rolled with visual highlights - dice that "count" will be raised
+    love.graphics.setColor(1, 1, 1, 1)
+    local diceX = sidebarWidth + 20
+    local diceY = feedbackY + 35  -- Centered vertically in the shorter panel
+    
+    -- Use the new highlighted dice display that shows which dice count
+    diceSystem:drawWithHighlight(actionResult.dice, diceX, diceY, 1.5)
+    
+    -- Display subtle outcome indicator text centered below dice
+    local panelWidth = screenWidth - (sidebarWidth * 2) - 20
+    local resultText = diceSystem:getResultText(actionResult.outcome)
+    love.graphics.setColor(diceSystem:getResultColor(actionResult.outcome))
+    love.graphics.setColor(1, 1, 1, 0.7)  -- More subtle text
+    love.graphics.printf(resultText, sidebarWidth + 10, diceY + 45, panelWidth - 10, "center")
+    
+    -- Draw modifiers if present
+    self:drawActionModifiers(actionResult.modifiers, screenWidth, sidebarWidth, diceY)
+end
+
+-- Draw the action modifiers
+function Combat:drawActionModifiers(modifiers, screenWidth, sidebarWidth, diceY)
+    -- If we have modifiers, display them on the right side
+    if modifiers and #modifiers > 0 then
+        local modX = screenWidth - sidebarWidth - 150
+        love.graphics.setColor(1, 1, 1, 0.9)
+        love.graphics.print("MODIFIERS:", modX, diceY + 5)
+        
+        for i, mod in ipairs(modifiers) do
+            -- Choose color based on modifier value
+            if mod.value > 0 then
+                love.graphics.setColor(0.2, 0.8, 0.2, 0.8) -- Green for positive
+            else
+                love.graphics.setColor(0.8, 0.2, 0.2, 0.8) -- Red for negative
+            end
+            
+            local sign = mod.value > 0 and "+" or ""
+            love.graphics.print(mod.description .. " " .. sign .. mod.value, modX, diceY + 5 + (i * 20))
+        end
+    end
+end
+
+-- Draw the action panel (buttons or movement controls)
+function Combat:drawActionPanel(battle, buttonsY, layout)
+    local screenWidth = layout.screenWidth
+    local CONTROLS_HEIGHT = Constants.UI.COMBAT.CONTROLS_HEIGHT
+    
+    -- Common panel for action buttons or movement controls
+    self:drawUIPanel(0, buttonsY, screenWidth, CONTROLS_HEIGHT)
+    
+    -- Different controls based on phase
+    if battle.turn == "player" then
+        if battle.phase == "action" then
+            self:drawActionButtons(battle, buttonsY, screenWidth, layout.sidebarWidth)
+        else
+            self:drawMovementControls(battle, buttonsY, screenWidth)
+        end
+    else
+        -- Enemy turn - show a "Waiting..." animation or indicator
+        love.graphics.setColor(0.7, 0.7, 0.7, 0.7)
+        love.graphics.printf("ENEMY TAKING ACTION...", 0, buttonsY + 15, screenWidth, "center")
+    end
+end
+
+-- Draw the action buttons
+function Combat:drawActionButtons(battle, buttonsY, screenWidth, sidebarWidth)
+    -- Center buttons in the available space
+    local buttonSpacing = 20
+    local buttonWidth = 160
+    local buttonHeight = 40
+    local buttonY = buttonsY + 5  -- Standard button Y position
+    local totalButtonsWidth = (3 * buttonWidth) + (2 * buttonSpacing) + 125 + buttonSpacing
+    local startX = (screenWidth - totalButtonsWidth) / 2
+    
+    -- Store button positions for consistent hitbox testing
+    self.actionButtons = {
+        fire = { x = startX, y = buttonY, width = buttonWidth, height = buttonHeight },
+        evade = { x = startX + buttonWidth + buttonSpacing, y = buttonY, width = buttonWidth, height = buttonHeight },
+        repair = { x = startX + (buttonWidth + buttonSpacing) * 2, y = buttonY, width = buttonWidth, height = buttonHeight },
+        endTurn = { x = startX + (buttonWidth + buttonSpacing) * 3, y = buttonY, width = 125, height = buttonHeight }
+    }
+    
+    -- Fire Cannons button
+    self:drawButton(
+        self.actionButtons.fire.x, 
+        self.actionButtons.fire.y, 
+        self.actionButtons.fire.width, 
+        self.actionButtons.fire.height, 
+        {0.8, 0.3, 0.3, 0.9}, "FIRE CANNONS", 
+        battle.playerShip.crewPoints >= self.actionCosts.fire
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.fire.x, 
+        self.actionButtons.fire.y, 
+        self.actionButtons.fire.width, 
+        self.actionButtons.fire.height
+    )
+    
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("(" .. self.actionCosts.fire .. " CP)", self.actionButtons.fire.x + 20, self.actionButtons.fire.y + 25, 0, 0.8, 0.8)
+    
+    -- Evade button
+    self:drawButton(
+        self.actionButtons.evade.x, 
+        self.actionButtons.evade.y, 
+        self.actionButtons.evade.width, 
+        self.actionButtons.evade.height,
+        {0.3, 0.3, 0.8, 0.9}, "EVADE", 
+        battle.playerShip.crewPoints >= self.actionCosts.evade
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.evade.x, 
+        self.actionButtons.evade.y, 
+        self.actionButtons.evade.width, 
+        self.actionButtons.evade.height
+    )
+    
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("(" .. self.actionCosts.evade .. " CP)", self.actionButtons.evade.x + 20, self.actionButtons.evade.y + 25, 0, 0.8, 0.8)
+    
+    -- Repair button
+    self:drawButton(
+        self.actionButtons.repair.x, 
+        self.actionButtons.repair.y, 
+        self.actionButtons.repair.width, 
+        self.actionButtons.repair.height,
+        {0.3, 0.8, 0.3, 0.9}, "REPAIR", 
+        battle.playerShip.crewPoints >= self.actionCosts.repair
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.repair.x, 
+        self.actionButtons.repair.y, 
+        self.actionButtons.repair.width, 
+        self.actionButtons.repair.height
+    )
+    
+    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.print("(" .. self.actionCosts.repair .. " CP)", self.actionButtons.repair.x + 20, self.actionButtons.repair.y + 25, 0, 0.8, 0.8)
+    
+    -- End Turn button
+    self:drawButton(
+        self.actionButtons.endTurn.x, 
+        self.actionButtons.endTurn.y, 
+        self.actionButtons.endTurn.width, 
+        self.actionButtons.endTurn.height,
+        {0.7, 0.7, 0.7, 0.9}, "END TURN", true
+    )
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(
+        self.actionButtons.endTurn.x, 
+        self.actionButtons.endTurn.y, 
+        self.actionButtons.endTurn.width, 
+        self.actionButtons.endTurn.height
+    )
+end
+
+-- Draw the movement controls
+function Combat:drawMovementControls(battle, buttonsY, screenWidth)
+    -- Position info in left side
+    love.graphics.setColor(1, 1, 1, 0.8)
+    local posText = "POSITION: [" .. battle.playerShip.position[1] .. "," .. battle.playerShip.position[2] .. "]"
+    love.graphics.print(posText, 50, buttonsY + 15)
+    
+    -- Direction hint if ship is selected
+    if self.selectedHex then
+        love.graphics.setColor(0.3, 0.8, 0.9, 0.9)
+        local dirText = "SELECT A BLUE HEX TO MOVE"
+        love.graphics.print(dirText, 300, buttonsY + 15)
+    end
+    
+    -- End Move/To Action button (right side)
+    local moveButtonX = screenWidth - 175
+    local moveButtonY = buttonsY + 5
+    local moveButtonWidth = 125
+    local moveButtonHeight = 40
+    
+    -- Store button position for consistent hitbox testing
+    self.moveActionButton = {
+        x = moveButtonX,
+        y = moveButtonY,
+        width = moveButtonWidth,
+        height = moveButtonHeight
+    }
+    
+    if battle.playerShip.movesRemaining <= 0 then
+        self:drawButton(moveButtonX, moveButtonY, moveButtonWidth, moveButtonHeight, 
+                        {0.8, 0.7, 0.2, 0.9}, "END MOVE", true)
+    else
+        self:drawButton(moveButtonX, moveButtonY, moveButtonWidth, moveButtonHeight, 
+                        {0.7, 0.7, 0.2, 0.9}, "TO ACTION", true)
+    end
+    
+    -- Draw hitbox if debug is on
+    self:drawButtonHitbox(moveButtonX, moveButtonY, moveButtonWidth, moveButtonHeight)
+end
+
+-- Draw the instructions panel
+function Combat:drawInstructionsPanel(battle, buttonsY, layout)
+    local screenWidth = layout.screenWidth
+    local CONTROLS_HEIGHT = Constants.UI.COMBAT.CONTROLS_HEIGHT
+    local INSTRUCTIONS_HEIGHT = Constants.UI.COMBAT.INSTRUCTIONS_HEIGHT
+    
+    -- Position it below the action buttons panel
+    self:drawUIPanel(0, buttonsY + CONTROLS_HEIGHT, screenWidth, INSTRUCTIONS_HEIGHT)
+    
+    -- Draw instructions text
+    love.graphics.setColor(1, 1, 1, 0.9)
+    local instructions = ""
+    if battle.turn == "player" then
+        if battle.phase == "movement" then
+            instructions = "MOVEMENT PHASE: Click your ship, then click a blue hex to move"
+        elseif battle.phase == "action" then
+            instructions = "ACTION PHASE: Click a button to perform an action"
+        end
+    else
+        instructions = "ENEMY TURN: Please wait..."
+    end
+    love.graphics.printf(instructions, 20, buttonsY + CONTROLS_HEIGHT + 8, screenWidth - 40, "center")
+end
+
+-- Helper function to draw a UI panel with background
+function Combat:drawUIPanel(x, y, width, height, r, g, b, a)
+    local color
+    -- Use provided color values or constants if color arguments are nil
+    if r == nil then
+        color = Constants.COLORS.UI_PANEL
+    else
+        color = {r, g, b, a}
+    end
+    
+    -- Draw panel background
+    love.graphics.setColor(color)
+    love.graphics.rectangle("fill", x, y, width, height, 5, 5)
+    
+    -- Draw panel border
+    love.graphics.setColor(Constants.COLORS.UI_BORDER)
+    love.graphics.rectangle("line", x, y, width, height, 5, 5)
+end
+
+-- Helper function to draw a progress bar
+function Combat:drawProgressBar(x, y, width, height, fillPercent, fillColor, emptyColor)
+    -- Clamp fill percent between 0 and 1
+    fillPercent = math.max(0, math.min(1, fillPercent))
+    
+    -- Draw background (empty part)
+    love.graphics.setColor(emptyColor[1], emptyColor[2], emptyColor[3], emptyColor[4] or 1)
+    love.graphics.rectangle("fill", x, y, width, height, 3, 3)
+    
+    -- Draw filled part
+    love.graphics.setColor(fillColor[1], fillColor[2], fillColor[3], fillColor[4] or 1)
+    love.graphics.rectangle("fill", x, y, width * fillPercent, height, 3, 3)
+    
+    -- Draw border
+    love.graphics.setColor(1, 1, 1, 0.5)
+    love.graphics.rectangle("line", x, y, width, height, 3, 3)
+    
+    -- Draw notches for visual scale reference (every 25%)
+    love.graphics.setColor(1, 1, 1, 0.3)
+    for i = 1, 3 do
+        local notchX = x + (width * (i / 4))
+        love.graphics.line(notchX, y, notchX, y + height)
+    end
+    
+    -- Add color indicator based on value (red for low, yellow for medium, green for good)
+    if fillPercent < 0.25 then
+        -- Draw critical indicator for low health
+        if fillPercent < 0.3 and emptyColor[1] > 0.5 then -- Only for health bars
+            love.graphics.setColor(1, 0, 0, math.abs(math.sin(love.timer.getTime() * 4)) * 0.8)
+            love.graphics.rectangle("fill", x, y, width * fillPercent, height, 3, 3)
+        end
+    end
+end
+
+-- Helper function to draw a button
+function Combat:drawButton(x, y, width, height, color, text, enabled)
+    -- Darken the button if disabled
+    local buttonColor = {color[1], color[2], color[3], color[4] or 1}
+    if not enabled then
+        buttonColor[1] = buttonColor[1] * 0.4
+        buttonColor[2] = buttonColor[2] * 0.4
+        buttonColor[3] = buttonColor[3] * 0.4
+    end
+    
+    -- Draw button shadow for depth
+    love.graphics.setColor(0, 0, 0, 0.3)
+    love.graphics.rectangle("fill", x + 2, y + 2, width, height, 5, 5)
+    
+    -- Draw button background with gradient effect
+    local gradientTop = {
+        buttonColor[1] * 1.2,
+        buttonColor[2] * 1.2,
+        buttonColor[3] * 1.2,
+        buttonColor[4]
+    }
+    
+    -- Top half with lighter color
+    love.graphics.setColor(gradientTop)
+    love.graphics.rectangle("fill", x, y, width, height/2, 5, 5)
+    
+    -- Bottom half with original color
+    love.graphics.setColor(buttonColor)
+    love.graphics.rectangle("fill", x, y + height/2, width, height/2, 5, 5)
+    
+    -- Draw button border
+    if enabled then
+        love.graphics.setColor(1, 1, 1, 0.8)
+    else
+        love.graphics.setColor(0.5, 0.5, 0.5, 0.5)
+    end
+    love.graphics.rectangle("line", x, y, width, height, 5, 5)
+    
+    -- Draw button text with slight shadow for better readability
+    if enabled then
+        -- Text shadow
+        love.graphics.setColor(0, 0, 0, 0.5)
+        local textX = x + (width / 2) - (love.graphics.getFont():getWidth(text) / 2) + 1
+        local textY = y + (height / 2) - (love.graphics.getFont():getHeight() / 2) + 1
+        love.graphics.print(text, textX, textY)
+        
+        -- Actual text
+        love.graphics.setColor(1, 1, 1, 1)
+    else
+        love.graphics.setColor(0.7, 0.7, 0.7, 0.7)
+    end
+    
+    -- Center text on button
+    local textX = x + (width / 2) - (love.graphics.getFont():getWidth(text) / 2)
+    local textY = y + (height / 2) - (love.graphics.getFont():getHeight() / 2)
+    love.graphics.print(text, textX, textY)
+    
+    -- Add subtle highlight effect on the top edge for 3D effect
+    if enabled then
+        love.graphics.setColor(1, 1, 1, 0.3)
+        love.graphics.line(x + 2, y + 2, x + width - 2, y + 2)
+    end
+end
+
+-- Handle mouse movement
+function Combat:mousemoved(x, y, gameState)
+    if not gameState.combat then return end
+    
+    -- Update hovered hex
+    self.hoveredHex = self:getHexFromScreen(x, y)
+end
+
+-- Helper function to check if a point is inside a button
+function Combat:isPointInButton(x, y, buttonX, buttonY, buttonWidth, buttonHeight)
+    -- Simple rectangular hitbox check
+    return x >= buttonX and x <= buttonX + buttonWidth and
+           y >= buttonY and y <= buttonY + buttonHeight
+end
+
+-- Debug function to draw hitboxes (only used in debug mode)
+function Combat:drawButtonHitbox(buttonX, buttonY, buttonWidth, buttonHeight)
+    if self.showDebugHitboxes then
+        love.graphics.setColor(1, 0, 0, 0.3)
+        love.graphics.rectangle("line", buttonX, buttonY, buttonWidth, buttonHeight)
+        -- Draw a small dot at the button center for reference
+        love.graphics.setColor(1, 0, 0, 0.8)
+        love.graphics.circle("fill", buttonX + buttonWidth/2, buttonY + buttonHeight/2, 2)
+    end
+end
+
+-- Handle mouse clicks
+function Combat:mousepressed(x, y, button, gameState)
+    if not gameState.combat then return end
+    
+    -- Only handle left clicks
+    if button ~= 1 then return end
+    
+    local battle = gameState.combat
+    
+    -- Use layout constants from draw function
+    local layout = self.layoutConstants
+    if not layout then return end
+    
+    -- Calculate the y-position of the buttons panel
+    local buttonsY = self:calculateButtonsY(battle, layout)
+    
+    -- First check if clicking on UI buttons
+    if battle.turn == "player" then
+        -- Try to handle button clicks based on the phase
+        if self:handleButtonClick(x, y, battle, buttonsY, gameState) then
+            return -- Button was clicked and handled
+        end
+    end
+    
+    -- If not clicking buttons, check for hex grid interactions
+    -- (but only if click is inside the grid area)
+    if self:isPointInGridArea(x, y, layout) then
+        if battle.turn == "player" and battle.phase == "movement" then
+            self:handleHexClick(x, y, battle, gameState)
+        end
+    end
+end
+
+-- Calculate the Y position for the buttons panel
+function Combat:calculateButtonsY(battle, layout)
+    local buttonsY = 0
+    
+    if battle.actionResult then
+        -- Below the feedback panel
+        buttonsY = layout.gridBottom + Constants.UI.COMBAT.FEEDBACK_HEIGHT + 10
+    else
+        -- At the bottom of the grid area
+        buttonsY = layout.gridBottom + 5
+    end
+    
+    return buttonsY
+end
+
+-- Handle button clicks in the UI
+function Combat:handleButtonClick(x, y, battle, buttonsY, gameState)
+    -- Phase transition button (movement -> action) during movement phase
+    if battle.phase == "movement" then
+        if self:handleMovementPhaseButton(x, y, battle) then
+            return true
+        end
+    elseif battle.phase == "action" then
+        if self:handleActionPhaseButtons(x, y, battle, gameState) then
+            return true
+        end
+    end
+    
+    return false -- No button was clicked
+end
+
+-- Handle movement phase button clicks
+function Combat:handleMovementPhaseButton(x, y, battle)
+    if self.moveActionButton and 
+       self:isPointInButton(x, y, self.moveActionButton.x, self.moveActionButton.y, 
+                         self.moveActionButton.width, self.moveActionButton.height) then
+        -- End movement phase and start action phase
+        battle.phase = "action"
+        return true
+    end
+    
+    return false
+end
+
+-- Handle action phase button clicks
+function Combat:handleActionPhaseButtons(x, y, battle, gameState)
+    -- Check for button clicks using stored button positions
+    if not self.actionButtons then return false end
+    
+    -- Fire Cannons button
+    if self:isPointInButton(x, y, self.actionButtons.fire.x, self.actionButtons.fire.y, 
+                          self.actionButtons.fire.width, self.actionButtons.fire.height) and 
+       battle.playerShip.crewPoints >= self.actionCosts.fire then
+        battle.actionResult = self:fireCannons(gameState)
+        battle.playerShip.hasActed = true
+        return true
+    end
+    
+    -- Evade button
+    if self:isPointInButton(x, y, self.actionButtons.evade.x, self.actionButtons.evade.y, 
+                          self.actionButtons.evade.width, self.actionButtons.evade.height) and 
+       battle.playerShip.crewPoints >= self.actionCosts.evade then
+        battle.actionResult = self:evade(gameState)
+        battle.playerShip.hasActed = true
+        return true
+    end
+    
+    -- Repair button
+    if self:isPointInButton(x, y, self.actionButtons.repair.x, self.actionButtons.repair.y, 
+                          self.actionButtons.repair.width, self.actionButtons.repair.height) and 
+       battle.playerShip.crewPoints >= self.actionCosts.repair then
+        battle.actionResult = self:repair(gameState)
+        battle.playerShip.hasActed = true
+        return true
+    end
+    
+    -- End Turn button
+    if self:isPointInButton(x, y, self.actionButtons.endTurn.x, self.actionButtons.endTurn.y, 
+                          self.actionButtons.endTurn.width, self.actionButtons.endTurn.height) then
+        self:endPlayerTurn(gameState)
+        return true
+    end
+    
+    return false
+end
+
+-- Check if a point is within the grid area
+function Combat:isPointInGridArea(x, y, layout)
+    local centerAreaLeft = layout.sidebarWidth
+    local centerAreaRight = layout.screenWidth - layout.sidebarWidth
+    
+    -- Return true if point is inside the grid area
+    return x >= centerAreaLeft and x <= centerAreaRight and y >= layout.gridTop and y <= layout.gridBottom
+end
+
+-- Handle hex grid clicks during the movement phase
+function Combat:handleHexClick(x, y, battle, gameState)
+    local clickedHex = self:getHexFromScreen(x, y)
+    if not clickedHex then return end
+    
+    local q, r = clickedHex[1], clickedHex[2]
+    
+    -- Check bounds to make sure we're not out of the grid
+    if q < 0 or q >= self.GRID_SIZE or r < 0 or r >= self.GRID_SIZE then
+        return
+    end
+    
+    -- If the player's ship is clicked, select it
+    if battle.grid[q][r].isPlayerShip then
+        self:selectPlayerShip(clickedHex, battle, gameState)
+    -- If a valid move hex is clicked, move the ship there
+    elseif self.selectedHex and self:isValidMove(q, r) then
+        self:movePlayerShip(q, r, battle, gameState)
+    end
+end
+
+-- Select the player's ship for movement
+function Combat:selectPlayerShip(clickedHex, battle, gameState)
+    self.selectedHex = clickedHex
+    -- Calculate valid moves from this position
+    self.validMoves = self:calculateValidMoves(battle, battle.playerShip)
+    
+    -- Debug
+    if gameState.settings.debug then
+        local q, r = clickedHex[1], clickedHex[2]
+        print("Selected player ship at " .. q .. "," .. r .. 
+              " with " .. battle.playerShip.movesRemaining .. " moves remaining")
+    end
+end
+
+-- Move the player's ship to a new position
+function Combat:movePlayerShip(q, r, battle, gameState)
+    -- Move the ship to the new position
+    self:moveShip(battle, battle.playerShip, q, r)
+    
+    -- Recalculate valid moves or clear them if no moves left
+    if battle.playerShip.movesRemaining > 0 then
+        self.validMoves = self:calculateValidMoves(battle, battle.playerShip)
+    else
+        self.validMoves = {}
+        self.selectedHex = nil
+        
+        -- If out of moves, auto-transition to action phase
+        battle.phase = "action"
+    end
+    
+    -- Debug
+    if gameState.settings.debug then
+        print("Moved player ship to " .. q .. "," .. r .. 
+              " with " .. battle.playerShip.movesRemaining .. " moves remaining")
+    end
+end
+
+-- End player turn and start enemy turn
+function Combat:endPlayerTurn(gameState)
+    local battle = gameState.combat
+    
+    -- Reset player ship for next turn
+    battle.playerShip.hasActed = false
+    battle.playerShip.movesRemaining = shipUtils.getBaseSpeed(battle.playerShip.class)
+    battle.playerShip.crewPoints = battle.playerShip.maxCrewPoints
+    
+    -- Switch to enemy turn
+    battle.turn = "enemy"
+    battle.phase = "movement"
+    
+    -- Process enemy turn (simple AI)
+    self:processEnemyTurn(gameState)
+end
+
+-- Process enemy turn with simple AI
+function Combat:processEnemyTurn(gameState)
+    local battle = gameState.combat
+    
+    -- Movement phase - enemy moves based on tactical situation
+    self:processEnemyMovement(gameState)
+    
+    -- Action phase - enemy chooses an action based on health
+    battle.phase = "action"
+    self:processEnemyAction(gameState)
+    
+    -- End the enemy turn and prepare for player turn
+    self:finalizeEnemyTurn(battle)
+end
+
+-- Finalize the enemy turn and prepare for player turn
+function Combat:finalizeEnemyTurn(battle)
+    -- Reset enemy ship for next turn
+    battle.enemyShip.hasActed = false
+    battle.enemyShip.movesRemaining = shipUtils.getBaseSpeed(battle.enemyShip.class)
+    battle.enemyShip.crewPoints = battle.enemyShip.maxCrewPoints
+    
+    -- Increment turn counter
+    battle.turnCount = battle.turnCount + 1
+    
+    -- Reset for player turn
+    battle.turn = "player"
+    battle.phase = "movement"
+end
+
+-- Process enemy movement
+function Combat:processEnemyMovement(gameState)
+    local battle = gameState.combat
+    local enemyShip = battle.enemyShip
+    local playerShip = battle.playerShip
+    
+    -- Calculate initial state
+    local eq, er = enemyShip.position[1], enemyShip.position[2]
+    local pq, pr = playerShip.position[1], playerShip.position[2]
+    local distance = self:hexDistance(eq, er, pq, pr)
+    local movesRemaining = enemyShip.movesRemaining
+    
+    -- Calculate health percentage (affects tactical decisions)
+    local maxHealth = shipUtils.getMaxHP(enemyShip.class)
+    local healthPercent = enemyShip.durability / maxHealth
+    
+    -- Keep moving until we run out of moves or valid moves
+    while movesRemaining > 0 do
+        -- Get all possible moves
+        local validMoves = self:calculateValidMoves(battle, enemyShip)
+        if #validMoves == 0 then break end
+        
+        -- Find the best move
+        local bestMove = self:findBestEnemyMove(validMoves, healthPercent, playerShip)
+        
+        -- Execute the chosen move
+        if bestMove then
+            self:moveShip(battle, enemyShip, bestMove[1], bestMove[2])
+            movesRemaining = enemyShip.movesRemaining
+        else
+            break
+        end
+    end
+end
+
+-- Find the best move for the enemy ship based on tactical situation
+function Combat:findBestEnemyMove(validMoves, healthPercent, playerShip)
+    local bestMove = nil
+    local bestScore = -1000
+    local pq, pr = playerShip.position[1], playerShip.position[2]
+    
+    for _, move in ipairs(validMoves) do
+        local moveQ, moveR = move[1], move[2]
+        local newDist = self:hexDistance(moveQ, moveR, pq, pr)
+        
+        -- Calculate score based on enemy's health and strategy
+        local score = self:calculateMoveScore(newDist, healthPercent)
+        
+        -- Take the highest-scoring move
+        if score > bestScore then
+            bestScore = score
+            bestMove = move
+        end
+    end
+    
+    return bestMove
+end
+
+-- Calculate a score for a potential move based on tactical situation
+function Combat:calculateMoveScore(distance, healthPercent)
+    local score = 0
+    
+    -- Different strategies based on health
+    if healthPercent > 0.7 then
+        -- Aggressive when healthy - get closer to attack
+        score = -distance  -- Negative distance = prefer closer
+    elseif healthPercent > 0.3 then
+        -- Cautious when moderately damaged - maintain medium distance
+        score = -(math.abs(distance - 3))  -- Prefer distance of about 3 hexes
+    else
+        -- Defensive when critically damaged - flee
+        score = distance  -- Prefer farther
+    end
+    
+    -- Add slight randomization to avoid predictable behavior
+    score = score + math.random() * 0.5
+    
+    return score
+end
+
+-- Process enemy action based on health
+function Combat:processEnemyAction(gameState)
+    local battle = gameState.combat
+    local enemyShip = battle.enemyShip
+    
+    -- Calculate health percentage
+    local maxHealth = shipUtils.getMaxHP(enemyShip.class)
+    local healthPercent = enemyShip.durability / maxHealth
+    
+    -- Choose and execute an action based on health level
+    battle.actionResult = self:chooseEnemyAction(gameState, healthPercent)
+    
+    -- Short delay to show the action result (would be implemented better with a timer)
+    love.timer.sleep(0.5)
+end
+
+-- Choose an appropriate action for the enemy based on health
+function Combat:chooseEnemyAction(gameState, healthPercent)
+    -- Different actions based on health threshold:
+    if healthPercent < 0.3 then
+        -- Critically damaged - try to repair
+        return self:repair(gameState)
+    elseif healthPercent < 0.7 then
+        -- Moderately damaged - try to evade
+        return self:evade(gameState)
+    else
+        -- Healthy - attack!
+        return self:fireCannons(gameState)
+    end
+end
+
+-- Start a naval battle
+function Combat:startBattle(gameState, enemyShipClass)
+    -- Initialize a new battle
+    self:initBattle(gameState, enemyShipClass)
+    
+    -- Set game state to combat mode
+    gameState.settings.combatMode = true
+    
+    return true
+end
+
+-- Fire cannons action (Ticket 3-2)
+function Combat:fireCannons(gameState, target)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:fireCannons")
+    assert(gameState.combat, "No active battle found in gameState")
+    
+    local battle = gameState.combat
+    local attacker = battle.turn == "player" and battle.playerShip or battle.enemyShip
+    local defender = battle.turn == "player" and battle.enemyShip or battle.playerShip
+    
+    -- Validate battle state
+    assert(attacker, "No attacker ship found in battle")
+    assert(defender, "No defender ship found in battle")
+    
+    -- Check if enough crew points are available
+    if attacker.crewPoints < self.actionCosts.fire then
+        return {
+            action = "fire",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.fire .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    attacker.crewPoints = attacker.crewPoints - self.actionCosts.fire
+    
+    -- Calculate base dice based on firepower (cannons)
+    local baseDice = shipUtils.getBaseFirepowerDice(attacker.class)
+    
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Check for point blank range (adjacent hex)
+    local aq, ar = attacker.position[1], attacker.position[2]
+    local dq, dr = defender.position[1], defender.position[2]
+    local dist = self:hexDistance(aq, ar, dq, dr)
+    
+    if dist == 1 then
+        -- Point blank range gives +1 die
+        table.insert(modifiers, diceSystem:createModifier("Point Blank Range", 1, true))
+    end
+    
+    -- Check for Gunner in crew (adds skill as bonus dice)
+    if battle.turn == "player" then
+        -- Check player's crew for Gunner
+        for _, member in ipairs(gameState.crew.members) do
+            if member.role == "Gunner" then
+                -- Add Gunner's skill level as a modifier
+                local gunnerBonus = member.skill * Constants.GAME.GUNNER_SKILL_MULTIPLIER
+                table.insert(modifiers, diceSystem:createModifier("Gunner: " .. member.name, gunnerBonus, true))
+                
+                if gameState.settings.debug then
+                    print("Gunner modifier: +" .. gunnerBonus .. " dice from " .. member.name)
+                end
+                
+                break  -- Only apply the first Gunner's bonus for now
+            end
+        end
+    end
+    
+    -- Apply defender's evade score as a negative modifier
+    if defender.evadeScore > 0 then
+        table.insert(modifiers, diceSystem:createModifier("Target Evading", -defender.evadeScore, true))
+        -- Reset defender's evade score after this attack
+        defender.evadeScore = 0
+    end
+    
+    -- Add any persistent modifiers from attacker
+    for _, mod in ipairs(attacker.modifiers) do
+        if mod.category == "attack" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for attack with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
+    
+    -- Calculate damage based on outcome level
+    local damage = 0
+    if outcome.result == "critical" then
+        damage = Constants.COMBAT.DAMAGE_CRITICAL  -- Critical hit damage
+    elseif outcome.result == "success" then
+        damage = Constants.COMBAT.DAMAGE_SUCCESS  -- Success damage
+    elseif outcome.result == "partial" then
+        damage = Constants.COMBAT.DAMAGE_PARTIAL  -- Partial success damage
+    end
+    
+    -- Apply damage to target
+    if battle.turn == "player" then
+        -- Player attacks enemy
+        battle.enemyShip.durability = math.max(0, (battle.enemyShip.durability or 10) - damage)
+        
+        -- Check if enemy is destroyed
+        if battle.enemyShip.durability <= 0 then
+            -- Enemy ship is sunk - player wins
+            self:endBattle(gameState, "victory")
+            return true
+        end
+    else
+        -- Enemy attacks player
+        gameState.ship.durability = math.max(0, gameState.ship.durability - damage)
+        
+        -- Check if player is destroyed
+        if gameState.ship.durability <= 0 then
+            -- Player ship is sunk - player loses
+            self:endBattle(gameState, "defeat")
+            return true
+        end
+    end
+    
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(attacker)
+    
+    -- Return result for UI display
+    return {
+        action = "fire",
+        dice = diceResults,
+        outcome = outcome,
+        rollInfo = rollInfo,
+        damage = damage,
+        attacker = battle.turn,
+        targetDurability = battle.turn == "player" and battle.enemyShip.durability or gameState.ship.durability,
+        modifiers = modifiers
+    }
+end
+
+-- Clean up temporary modifiers
+function Combat:cleanupTemporaryModifiers(ship)
+    -- Filter out temporary modifiers
+    local persistentModifiers = {}
+    for _, mod in ipairs(ship.modifiers) do
+        if not mod.temporary then
+            table.insert(persistentModifiers, mod)
+        end
+    end
+    
+    -- Replace with only persistent modifiers
+    ship.modifiers = persistentModifiers
+end
+
+-- Evade action (Ticket 3-2)
+function Combat:evade(gameState)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:evade")
+    assert(gameState.combat, "No active battle found in gameState")
+    
+    local battle = gameState.combat
+    local ship = battle.turn == "player" and battle.playerShip or battle.enemyShip
+    
+    -- Validate battle state
+    assert(ship, "No ship found for current turn")
+    
+    -- Check if enough crew points are available
+    if ship.crewPoints < self.actionCosts.evade then
+        return {
+            action = "evade",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.evade .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    ship.crewPoints = ship.crewPoints - self.actionCosts.evade
+    
+    -- Calculate base dice based on ship class (speed influences evasion)
+    local baseDice = shipUtils.getBaseSpeed(ship.class)
+    
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Add any persistent modifiers from ship
+    for _, mod in ipairs(ship.modifiers) do
+        if mod.category == "evade" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for evasion with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
+    
+    -- Set evade score based on outcome level
+    local evadeScore = outcome.level  -- 0=failure, 1=partial, 2=success, 3=critical
+    
+    if battle.turn == "player" then
+        -- Player evades
+        battle.playerShip.evadeScore = evadeScore
+    else
+        -- Enemy evades
+        battle.enemyShip.evadeScore = evadeScore
+    end
+    
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(ship)
+    
+    -- Return result for UI display
+    return {
+        action = "evade",
+        dice = diceResults,
+        outcome = outcome,
+        rollInfo = rollInfo,
+        evadeScore = evadeScore,
+        ship = battle.turn,
+        modifiers = modifiers
+    }
+end
+
+-- Repair action (Ticket 3-2)
+function Combat:repair(gameState)
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Combat:repair")
+    assert(gameState.combat, "No active battle found in gameState")
+    
+    local battle = gameState.combat
+    local ship = battle.turn == "player" and battle.playerShip or battle.enemyShip
+    
+    -- Validate battle state
+    assert(ship, "No ship found for current turn")
+    
+    -- Check if enough crew points are available
+    if ship.crewPoints < self.actionCosts.repair then
+        return {
+            action = "repair",
+            success = false,
+            message = "Not enough crew points! (Need " .. self.actionCosts.repair .. ")"
+        }
+    end
+    
+    -- Deduct crew points
+    ship.crewPoints = ship.crewPoints - self.actionCosts.repair
+    
+    -- Calculate base dice - always 1 for base repair
+    local baseDice = 1
+    
+    -- Gather modifiers
+    local modifiers = {}
+    
+    -- Check for surgeon in crew (adds dice)
+    if battle.turn == "player" then
+        -- Check player's crew for surgeon
+        for _, member in ipairs(gameState.crew.members) do
+            if member.role == "Surgeon" then
+                -- Add surgeon's skill level as a modifier
+                table.insert(modifiers, diceSystem:createModifier("Surgeon: " .. member.name, member.skill, true))
+                break
+            end
+        end
+    end
+    
+    -- Add any persistent modifiers from ship
+    for _, mod in ipairs(ship.modifiers) do
+        if mod.category == "repair" then
+            table.insert(modifiers, mod)
+        end
+    end
+    
+    -- Roll dice for repair with modifiers
+    local diceResults, rollInfo = diceSystem:roll(baseDice, modifiers)
+    local outcome = diceSystem:interpret(diceResults)
+    
+    -- Calculate repair amount based on outcome level
+    local repairAmount = 0
+    if outcome.result == "critical" then
+        repairAmount = Constants.COMBAT.REPAIR_CRITICAL  -- Critical repair
+    elseif outcome.result == "success" then
+        repairAmount = Constants.COMBAT.REPAIR_SUCCESS  -- Success repair
+    elseif outcome.result == "partial" then
+        repairAmount = Constants.COMBAT.REPAIR_PARTIAL  -- Partial success repair
+    end
+    
+    -- Apply repairs
+    if battle.turn == "player" then
+        -- Player repairs their ship
+        local maxDurability = shipUtils.getMaxHP(gameState.ship.class)
+        gameState.ship.durability = math.min(gameState.ship.durability + repairAmount, maxDurability)
+    else
+        -- Enemy repairs their ship
+        local maxDurability = shipUtils.getMaxHP(ship.class)
+        battle.enemyShip.durability = math.min((battle.enemyShip.durability or 10) + repairAmount, maxDurability)
+    end
+    
+    -- Clean up temporary modifiers
+    self:cleanupTemporaryModifiers(ship)
+    
+    -- Return result for UI display
+    return {
+        action = "repair",
+        dice = diceResults,
+        outcome = outcome,
+        rollInfo = rollInfo,
+        repairAmount = repairAmount,
+        ship = battle.turn,
+        currentDurability = battle.turn == "player" and gameState.ship.durability or battle.enemyShip.durability,
+        modifiers = modifiers
+    }
+end
+
+-- Dice mechanics integration methods
+
+-- Initialize the dice system
+function Combat:initDiceSystem()
+    diceSystem:init()
+end
+
+-- Roll dice for combat actions (using the dice module)
+function Combat:rollDice(numDice)
+    return diceSystem:roll(numDice)
+end
+
+-- Interpret dice results (using the dice module)
+function Combat:interpretDiceResults(diceResults)
+    return diceSystem:interpret(diceResults)
+end
+
+-- End a naval battle
+function Combat:endBattle(gameState, result)
+    -- Process battle results
+    if result then
+        if result == "victory" then
+            -- Player won the battle
+            print("Victory! Enemy ship destroyed.")
+            -- Would add rewards here in later sprints
+        elseif result == "defeat" then
+            -- Player lost the battle
+            print("Defeat! Your ship was destroyed.")
+            -- Would add consequences here in later sprints
+        elseif result == "retreat" then
+            -- Player retreated from battle
+            print("You retreat from the battle.")
+        end
+    end
+    
+    -- Clean up combat state
+    gameState.combat = nil
+    
+    -- Exit combat mode
+    gameState.settings.combatMode = false
+    
+    return true
+end
+
+return Combat```
 
 ## src/conf.lua
 ```lua
@@ -3903,7 +9676,7 @@ function love.conf(t)
     t.version = "11.4"                -- The LÖVE version this game was made for
     t.window.width = 800              -- Game window width
     t.window.height = 600             -- Game window height
-    t.window.resizable = false        -- Let the window be user-resizable
+    t.window.resizable = true         -- Allow window to be resized with letterboxing/pillarboxing
     t.console = true                  -- Enable console for debug output
     
     -- For development
@@ -3914,10 +9687,611 @@ function love.conf(t)
     t.modules.physics = false         -- No need for physics module for map navigation
 end```
 
+## src/constants.lua
+```lua
+-- Game Constants
+-- Centralized definitions of commonly used values
+
+local Constants = {
+    -- ============ UI LAYOUT CONSTANTS ============
+    UI = {
+        -- General Screen
+        SCREEN_WIDTH = 800,
+        SCREEN_HEIGHT = 600,
+        
+        -- Combat Layout
+        COMBAT = {
+            TOP_BAR_HEIGHT = 30,
+            BOTTOM_BAR_HEIGHT = 80,
+            SIDEBAR_WIDTH = 140,
+            FEEDBACK_HEIGHT = 70,
+            CONTROLS_HEIGHT = 50,
+            INSTRUCTIONS_HEIGHT = 30,
+            BUTTON_WIDTH = 160,
+            BUTTON_HEIGHT = 40,
+            BUTTON_SPACING = 20,
+            HEX_RADIUS = 25
+        }
+    },
+    
+    -- ============ COLORS ============
+    COLORS = {
+        -- General UI Colors
+        UI_BACKGROUND = {0.08, 0.1, 0.15, 1},  -- Very dark blue/black
+        UI_PANEL = {0.15, 0.15, 0.25, 0.9},    -- Translucent dark blue
+        UI_BORDER = {0.3, 0.3, 0.5, 0.8},      -- Light border
+        UI_TEXT = {1, 1, 1, 0.8},              -- Soft white text
+        
+        -- Ship and Entity Colors
+        PLAYER_SHIP = {0.2, 0.8, 0.2, 1},      -- Green for player
+        ENEMY_SHIP = {0.8, 0.2, 0.2, 1},       -- Red for enemy
+        HOVER = {0.8, 0.8, 0.2, 0.6},          -- Yellow for hover
+        SELECTED = {0.2, 0.8, 0.8, 0.6},       -- Cyan for selected
+        
+        -- Action Button Colors
+        BUTTON_FIRE = {0.8, 0.3, 0.3, 0.9},    -- Red for fire actions
+        BUTTON_EVADE = {0.3, 0.3, 0.8, 0.9},   -- Blue for evade actions
+        BUTTON_REPAIR = {0.3, 0.8, 0.3, 0.9},  -- Green for repair actions
+        BUTTON_NEUTRAL = {0.7, 0.7, 0.7, 0.9}, -- Gray for neutral actions
+        
+        -- Resource Colors
+        GOLD = {0.9, 0.8, 0.2, 1},             -- Gold color
+        HEALTH = {0.2, 0.8, 0.2, 1},           -- Health green
+        DAMAGE = {0.8, 0.2, 0.2, 1},           -- Damage red
+        
+        -- Sea and Map
+        SEA = {0.1, 0.2, 0.4, 1},              -- Dark blue water
+        SEA_BORDER = {0.2, 0.4, 0.6, 0.8},     -- Lighter blue border
+        VALID_MOVE = {0.5, 0.7, 0.9, 0.6},     -- Light blue for valid moves
+        EMPTY_WATER = {0.3, 0.5, 0.7, 0.4}     -- Blue for empty water
+    },
+    
+    -- ============ COMBAT CONSTANTS ============
+    COMBAT = {
+        -- Grid Configuration
+        GRID_SIZE = 10,                         -- 10x10 grid
+        
+        -- Action Costs
+        CP_COST_FIRE = 1,                       -- Fire cannons cost 1 CP
+        CP_COST_EVADE = 1,                      -- Evade costs 1 CP
+        CP_COST_REPAIR = 2,                     -- Repair costs 2 CP
+        
+        -- Damage Values
+        DAMAGE_CRITICAL = 3,                    -- Critical hit damage
+        DAMAGE_SUCCESS = 2,                     -- Success damage
+        DAMAGE_PARTIAL = 1,                     -- Partial success damage
+        
+        -- Repair Values
+        REPAIR_CRITICAL = 15,                   -- Critical repair amount
+        REPAIR_SUCCESS = 10,                    -- Success repair amount
+        REPAIR_PARTIAL = 5                      -- Partial success repair amount
+    },
+    
+    -- ============ DICE CONSTANTS ============
+    DICE = {
+        SUCCESS = 6,                            -- Success on 6
+        PARTIAL_MIN = 4,                        -- Partial success on 4-5
+        PARTIAL_MAX = 5,                        -- Partial success on 4-5
+        FAILURE_MAX = 3,                        -- Failure on 1-3
+        
+        -- Outcome Levels
+        OUTCOME_CRITICAL = 3,                   -- Level for critical success
+        OUTCOME_SUCCESS = 2,                    -- Level for success
+        OUTCOME_PARTIAL = 1,                    -- Level for partial success
+        OUTCOME_FAILURE = 0                     -- Level for failure
+    },
+    
+    -- ============ CREW ROLES ============
+    ROLES = {
+        NAVIGATOR = "Navigator",
+        GUNNER = "Gunner",
+        SURGEON = "Surgeon"
+    },
+    
+    -- ============ GAME SETTINGS ============
+    GAME = {
+        -- Default Resources
+        DEFAULT_GOLD = 50,
+        DEFAULT_RUM = 0,
+        DEFAULT_TIMBER = 0,
+        DEFAULT_GUNPOWDER = 0,
+        
+        -- Default Crew Values
+        DEFAULT_MORALE = 5,                     -- Default crew morale (1-10)
+        
+        -- Time/Game Progress
+        TOTAL_WEEKS = 72,                       -- Total game duration
+        EARTHQUAKE_MIN_WEEK = 60,               -- Earliest earthquake week
+        EARTHQUAKE_MAX_WEEK = 72,               -- Latest earthquake week
+        
+        -- Default Travel Time
+        BASE_TRAVEL_TIME = 1,                   -- Base travel time (in weeks)
+        MIN_TRAVEL_TIME = 0.5,                  -- Minimum travel time
+        
+        -- Wind Effects
+        WIND_WITH = -0.5,                       -- Traveling with wind (weeks modifier)
+        WIND_AGAINST = 1,                       -- Traveling against wind (weeks modifier)
+        WIND_CHANGE_INTERVAL = 4,               -- How often wind might change (weeks)
+        
+        -- Inventory
+        DEFAULT_INVENTORY_SLOTS = 10,           -- Default inventory capacity
+        
+        -- Crew Effects
+        NAVIGATOR_TRAVEL_BONUS = -0.5,          -- Time reduction with Navigator (weeks)
+        GUNNER_SKILL_MULTIPLIER = 1,            -- Multiplier for Gunner's skill level (for future balancing)
+        VICTORY_LOYALTY_BONUS = 1,              -- Loyalty boost after victory
+        RUM_LOYALTY_BONUS = 2,                  -- Loyalty boost from rum
+        VOYAGE_LOYALTY_PENALTY = -1             -- Loyalty reduction per week at sea
+    }
+}
+
+return Constants```
+
+## src/dice.lua
+```lua
+-- Dice Module
+-- Implements a reusable dice system for Forged in the Dark mechanics
+
+-- Import constants
+local Constants = require('constants')
+local AssetUtils = require('utils.assetUtils')
+
+local Dice = {
+    -- Sprite sheet for dice
+    spriteSheet = nil,
+    spriteWidth = 32,
+    spriteHeight = 32,
+    quads = {}
+}
+
+-- Initialize dice system
+function Dice:init()
+    -- Load dice sprite sheet using AssetUtils
+    self.spriteSheet = AssetUtils.loadImage("assets/dice-strip.png", "dice")
+    
+    if self.spriteSheet then
+        -- Create quads for each die face
+        for i = 0, 5 do
+            self.quads[i+1] = love.graphics.newQuad(
+                i * self.spriteWidth, 0,
+                self.spriteWidth, self.spriteHeight,
+                self.spriteSheet:getDimensions()
+            )
+        end
+        
+        print("Dice sprite sheet loaded successfully")
+    else
+        print("Will use text representation for dice")
+    end
+end
+
+-- Modifier class for dice rolls
+local Modifier = {
+    description = "",  -- Description of the modifier
+    value = 0,         -- The dice modifier value (positive or negative)
+    temporary = false  -- Whether modifier is temporary (removed after roll)
+}
+
+-- Create a new modifier
+function Modifier:new(description, value, temporary)
+    local mod = {
+        description = description or "",
+        value = value or 0,
+        temporary = temporary or false
+    }
+    setmetatable(mod, self)
+    self.__index = self
+    return mod
+end
+
+-- Roll dice with modifiers
+function Dice:roll(baseDice, modifiers)
+    local modifiers = modifiers or {}
+    local results = {}
+    local rollInfo = {
+        baseDice = baseDice,
+        modifiers = {},       -- Copy of applied modifiers
+        totalDiceCount = 0,   -- Final dice count after modifiers
+        zeroOrNegative = false, -- Flag if we had 0 or negative dice
+        results = {},         -- The actual dice values rolled
+        rolls = {}            -- All roll operations (for debugging)
+    }
+    
+    -- Calculate total dice count from modifiers
+    local totalDice = baseDice
+    local modReport = {}
+    
+    -- Apply all modifiers
+    for _, mod in ipairs(modifiers) do
+        totalDice = totalDice + mod.value
+        table.insert(modReport, {
+            description = mod.description, 
+            value = mod.value
+        })
+        table.insert(rollInfo.rolls, "Applied " .. mod.description .. ": " .. (mod.value >= 0 and "+" or "") .. mod.value .. " dice")
+    end
+    
+    -- Store the full list of applied modifiers
+    rollInfo.modifiers = modReport
+    
+    -- Handle zero or negative dice count (roll 2 dice and take worst)
+    if totalDice <= 0 then
+        rollInfo.zeroOrNegative = true
+        rollInfo.totalDiceCount = 2
+        table.insert(rollInfo.rolls, "Reduced to " .. totalDice .. " dice - rolling 2 and taking worst")
+        
+        -- Roll 2 dice
+        for i = 1, 2 do
+            local dieValue = math.random(1, 6)
+            table.insert(results, dieValue)
+            table.insert(rollInfo.rolls, "Rolled " .. dieValue)
+        end
+        
+        -- Take the worst (lowest) value
+        table.sort(results)
+        rollInfo.results = {results[1]}  -- Keep only the lowest value
+        table.insert(rollInfo.rolls, "Taking worst value: " .. results[1])
+    else
+        -- Normal dice pool - roll adjusted number of dice (max 5)
+        totalDice = math.min(5, totalDice)
+        rollInfo.totalDiceCount = totalDice
+        
+        for i = 1, totalDice do
+            local dieValue = math.random(1, 6)
+            table.insert(results, dieValue)
+            table.insert(rollInfo.rolls, "Rolled " .. dieValue)
+        end
+        
+        rollInfo.results = results
+    end
+    
+    -- Return both the roll results and the detailed roll info
+    return results, rollInfo
+end
+
+-- Interpret dice results according to Forged in the Dark rules
+function Dice:interpret(diceResults)
+    local outcome = {
+        successes = 0,      -- Full successes (die = 6)
+        partials = 0,       -- Partial successes (die = 4-5)
+        failures = 0,       -- Failures (die = 1-3)
+        highestValue = 0,   -- The highest die value rolled
+        result = "failure", -- Overall result: "failure", "partial", "success", or "critical"
+        level = 0,          -- Numeric result level: 0=failure, 1=partial, 2=success, 3=critical
+        results = diceResults -- The original dice values
+    }
+    
+    -- No dice rolled
+    if #diceResults == 0 then
+        return outcome
+    end
+    
+    -- Process each die result
+    for _, die in ipairs(diceResults) do
+        -- Track highest value
+        outcome.highestValue = math.max(outcome.highestValue, die)
+        
+        -- Categorize results
+        if die == Constants.DICE.SUCCESS then
+            -- Success
+            outcome.successes = outcome.successes + 1
+        elseif die >= Constants.DICE.PARTIAL_MIN and die <= Constants.DICE.PARTIAL_MAX then
+            -- Partial success
+            outcome.partials = outcome.partials + 1
+        else
+            -- Failure
+            outcome.failures = outcome.failures + 1
+        end
+    end
+    
+    -- Determine overall result based on Forged in the Dark rules
+    -- Rule 1: Use highest die result (not the sum)
+    -- Rule 2: 2+ successes (6s) is a critical success
+    if outcome.successes >= 2 then
+        -- Critical success (2+ dice showing 6)
+        outcome.result = "critical"
+        outcome.level = Constants.DICE.OUTCOME_CRITICAL
+    elseif outcome.successes == 1 then
+        -- Full success (1 die showing 6)
+        outcome.result = "success"
+        outcome.level = Constants.DICE.OUTCOME_SUCCESS
+    elseif outcome.partials > 0 then
+        -- Partial success (highest die is 4-5)
+        outcome.result = "partial"
+        outcome.level = Constants.DICE.OUTCOME_PARTIAL
+    else
+        -- Failure (no dice showing 4+)
+        outcome.result = "failure"
+        outcome.level = Constants.DICE.OUTCOME_FAILURE
+    end
+    
+    return outcome
+end
+
+-- Draw dice results
+function Dice:draw(diceResults, x, y, scale)
+    local scale = scale or 1
+    local padding = 2 * scale
+    local width = self.spriteWidth * scale
+    
+    -- If no sprite sheet, use text representation
+    if not self.spriteSheet then
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (20 * scale + padding)
+            
+            -- Draw die background based on value
+            if value == 6 then
+                love.graphics.setColor(0.2, 0.8, 0.2, 0.8) -- Green for success
+            elseif value >= 4 then
+                love.graphics.setColor(0.8, 0.8, 0.2, 0.8) -- Yellow for partial
+            else
+                love.graphics.setColor(0.8, 0.2, 0.2, 0.8) -- Red for failure
+            end
+            
+            love.graphics.rectangle("fill", dieX, y, 20 * scale, 20 * scale, 3, 3)
+            
+            -- Draw die value
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.print(value, dieX + 7 * scale, y + 4 * scale)
+        end
+    else
+        -- Use sprite sheet
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (width + padding)
+            if self.spriteSheet and self.quads[value] then
+                love.graphics.draw(
+                    self.spriteSheet,
+                    self.quads[value],
+                    dieX,
+                    y,
+                    0,  -- rotation
+                    scale, scale  -- scale x, y
+                )
+            else
+                -- Draw placeholder if sprite sheet or quad is missing
+                AssetUtils.drawPlaceholder(dieX, y, self.spriteWidth * scale, self.spriteHeight * scale, "dice")
+            end
+        end
+    end
+    
+    -- Return the total width used by the dice
+    return #diceResults * (self.spriteWidth * scale + padding)
+end
+
+-- Draw dice results with highlighting for dice that "count"
+function Dice:drawWithHighlight(diceResults, x, y, scale)
+    local scale = scale or 1
+    local padding = 4 * scale
+    local width = self.spriteWidth * scale
+    local outcome = self:interpret(diceResults)
+    
+    -- If no sprite sheet, use text representation
+    if not self.spriteSheet then
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (20 * scale + padding)
+            local dieY = y
+            
+            -- Apply bump to dice that count
+            if (value == 6 and outcome.successes > 0) or 
+               (value >= 4 and value <= 5 and outcome.successes == 0 and outcome.partials > 0) or
+               (value <= 3 and outcome.successes == 0 and outcome.partials == 0) then
+                -- This die "counts" - bump it up
+                dieY = y - 5 * scale
+                
+                -- Add glow/shadow for highlighted dice
+                love.graphics.setColor(1, 1, 1, 0.3)
+                love.graphics.rectangle("fill", dieX - 2, dieY - 2, 24 * scale, 24 * scale, 5, 5)
+            end
+            
+            -- Draw die background based on value
+            if value == 6 then
+                love.graphics.setColor(0.2, 0.8, 0.2, 0.8) -- Green for success
+            elseif value >= 4 then
+                love.graphics.setColor(0.8, 0.8, 0.2, 0.8) -- Yellow for partial
+            else
+                love.graphics.setColor(0.8, 0.2, 0.2, 0.8) -- Red for failure
+            end
+            
+            love.graphics.rectangle("fill", dieX, dieY, 20 * scale, 20 * scale, 3, 3)
+            
+            -- Draw die value
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.print(value, dieX + 7 * scale, dieY + 4 * scale)
+        end
+    else
+        -- Use sprite sheet
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (width + padding)
+            local dieY = y
+            
+            -- Determine if this die should be highlighted (counts toward the outcome)
+            local shouldHighlight = false
+            
+            -- Critical success - all 6s count
+            if outcome.result == "critical" and value == Constants.DICE.SUCCESS then
+                shouldHighlight = true
+            -- Regular success - only one 6 counts (use the first one found)
+            elseif outcome.result == "success" and value == Constants.DICE.SUCCESS then
+                -- If we haven't yet highlighted a success die
+                if not outcome.hasHighlightedSuccess then
+                    shouldHighlight = true
+                    outcome.hasHighlightedSuccess = true
+                end
+            -- Partial success - only 4-5s count if there are no 6s
+            -- Always highlight the highest value die (4 or 5)
+            elseif outcome.result == "partial" then
+                -- Find the highest partial success die (4-5)
+                if not outcome.highestPartialValue then
+                    outcome.highestPartialValue = 0
+                    for _, v in ipairs(diceResults) do
+                        if v >= Constants.DICE.PARTIAL_MIN and v <= Constants.DICE.PARTIAL_MAX and v > outcome.highestPartialValue then
+                            outcome.highestPartialValue = v
+                        end
+                    end
+                end
+                
+                -- Highlight only the highest partial success die
+                if value == outcome.highestPartialValue and not outcome.hasHighlightedPartial then
+                    shouldHighlight = true
+                    outcome.hasHighlightedPartial = true
+                end
+            -- Failure - highlight the highest die (still a failure, but clearer)
+            elseif outcome.result == "failure" then
+                -- Find the highest die (which is still ≤ 3 for a failure)
+                if not outcome.highestFailureValue then
+                    outcome.highestFailureValue = 0
+                    for _, v in ipairs(diceResults) do
+                        if v <= Constants.DICE.FAILURE_MAX and v > outcome.highestFailureValue then
+                            outcome.highestFailureValue = v
+                        end
+                    end
+                end
+                
+                -- Highlight only the highest failure die
+                if value == outcome.highestFailureValue and not outcome.hasHighlightedFailure then
+                    shouldHighlight = true
+                    outcome.hasHighlightedFailure = true
+                end
+            end
+            
+            -- Apply bump to dice that count
+            if shouldHighlight then
+                -- This die "counts" - bump it up
+                dieY = y - 8 * scale
+            end
+            
+            -- Check if we can draw the die using the spritesheet
+            if self.spriteSheet and self.quads[value] then
+                -- Draw the die with appropriate highlight
+                love.graphics.setColor(1, 1, 1, 1)
+                if shouldHighlight then
+                    -- Add shadow for 3D effect
+                    love.graphics.setColor(0.3, 0.3, 0.3, 0.5)
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX + 2,
+                        dieY + 2,
+                        0,  -- rotation
+                        scale, scale  -- scale x, y
+                    )
+                    
+                    -- Draw highlighted die slightly larger
+                    love.graphics.setColor(1, 1, 1, 1)
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX,
+                        dieY,
+                        0,  -- rotation
+                        scale * 1.1, scale * 1.1  -- slightly larger scale
+                    )
+                else
+                    -- Draw regular die
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX,
+                        dieY,
+                        0,  -- rotation
+                        scale, scale  -- scale x, y
+                    )
+                end
+            else
+                -- Draw placeholder if sprite sheet or quad is missing
+                local placeholderHeight = self.spriteHeight * (shouldHighlight and scale * 1.1 or scale)
+                local placeholderWidth = self.spriteWidth * (shouldHighlight and scale * 1.1 or scale)
+                
+                AssetUtils.drawPlaceholder(dieX, dieY, placeholderWidth, placeholderHeight, "dice")
+                
+                -- Draw the die value as text in the center of the placeholder
+                love.graphics.setColor(1, 1, 1, 1)
+                love.graphics.print(value, dieX + placeholderWidth/2 - 5, dieY + placeholderHeight/2 - 8)
+            end
+        end
+    end
+    
+    -- Return the total width used by the dice
+    return #diceResults * (self.spriteWidth * scale + padding)
+end
+
+-- Get result text description
+function Dice:getResultText(outcome)
+    if outcome.result == "critical" then
+        return "Critical Success!"
+    elseif outcome.result == "success" then
+        return "Success"
+    elseif outcome.result == "partial" then
+        return "Partial Success"
+    else
+        return "Failure"
+    end
+end
+
+-- Get result color
+function Dice:getResultColor(outcome)
+    if outcome.result == "critical" then
+        return Constants.COLORS.HEALTH -- Bright green
+    elseif outcome.result == "success" then
+        return Constants.COLORS.PLAYER_SHIP -- Green
+    elseif outcome.result == "partial" then
+        return Constants.COLORS.GOLD -- Yellow
+    else
+        return Constants.COLORS.DAMAGE -- Red
+    end
+end
+
+-- Create a helper function to easily create modifiers
+function Dice:createModifier(description, value, temporary)
+    return Modifier:new(description, value, temporary)
+end
+
+-- Draw modifiers list
+function Dice:drawModifiers(modifiers, x, y, scale)
+    love.graphics.setColor(1, 1, 1, 1)
+    local yPos = y
+    local scale = scale or 1
+    local lineHeight = 20 * scale
+    
+    for i, mod in ipairs(modifiers) do
+        -- Choose color based on modifier value
+        if mod.value > 0 then
+            love.graphics.setColor(0.2, 0.8, 0.2, 1) -- Green for positive
+        else
+            love.graphics.setColor(0.8, 0.2, 0.2, 1) -- Red for negative
+        end
+        
+        local sign = mod.value > 0 and "+" or ""
+        love.graphics.print(mod.description .. ": " .. sign .. mod.value .. " dice", x, yPos)
+        yPos = yPos + lineHeight
+    end
+    
+    -- Reset color
+    love.graphics.setColor(1, 1, 1, 1)
+    
+    return yPos - y  -- Return total height used
+end
+
+-- Export the module and the Modifier class
+return {
+    dice = Dice,
+    Modifier = Modifier
+}```
+
 ## src/gameState.lua
 ```lua
 -- Game State Module
 -- Central repository for game state that needs to be accessed across modules
+
+-- Import ship utils
+local shipUtils = require('utils.shipUtils')
+
+-- Import constants
+local Constants = require('constants')
 
 local GameState = {
     -- Player ship information
@@ -3928,38 +10302,39 @@ local GameState = {
         x = 0,
         y = 0,
         isMoving = false,
-        -- Ship stats
-        speed = 3,          -- Hexes per turn in combat (future feature)
-        firepower = 2,      -- Number of cannons
-        durability = 10,    -- Hull hit points
-        crewCapacity = 4    -- Maximum crew size
+        -- Ship stats will be initialized based on class in init()
+        speed = nil,
+        firepower = nil,
+        durability = nil,
+        crewCapacity = nil
     },
     
     -- Time tracking
     time = {
         currentWeek = 1,
-        totalWeeks = 72,
+        totalWeeks = Constants.GAME.TOTAL_WEEKS,
         earthquakeWeek = nil,  -- Set during initialization
         isGameOver = false
     },
     
     -- Player resources
     resources = {
-        gold = 50,          -- Starting gold
-        rum = 0,
-        timber = 0,
-        gunpowder = 0
+        gold = Constants.GAME.DEFAULT_GOLD,          -- Starting gold
+        rum = Constants.GAME.DEFAULT_RUM,
+        timber = Constants.GAME.DEFAULT_TIMBER,
+        gunpowder = Constants.GAME.DEFAULT_GUNPOWDER
     },
     
-    -- Inventory system (10 slots for cargo and special items)
+    -- Inventory system for cargo and special items
     inventory = {
-        slots = {}          -- Will contain inventory slot objects
+        slots = {},         -- Will contain inventory slot objects
+        capacity = Constants.GAME.DEFAULT_INVENTORY_SLOTS
     },
     
     -- Crew management
     crew = {
         members = {},       -- Will contain crew member objects
-        morale = 5,         -- Scale 1-10
+        morale = Constants.GAME.DEFAULT_MORALE,  -- Scale 1-10
         
         -- Global crew pool - tracks all possible crew members in the game
         -- Each crew member has a unique ID
@@ -3998,11 +10373,15 @@ local GameState = {
     settings = {
         debug = false,  -- Set to false for normal gameplay, true for debugging
         portMode = false,  -- When true, display port/location interface instead of map
+        combatMode = false,  -- When true, display naval combat interface
         currentPortScreen = "main",  -- Which port screen to display: main, tavern, shipyard, crew, inventory
         
         -- Ship state flags
         moored = false  -- When true, ship is docked at a location rather than at sea
-    }
+    },
+    
+    -- Combat state will be populated when a battle starts
+    -- Structure shown in combat.lua
 }
 
 -- Initialize game state
@@ -4010,11 +10389,19 @@ function GameState:init()
     -- Seed random number generator
     math.randomseed(os.time())
     
-    -- Set earthquake week (random between weeks 60-72)
-    self.time.earthquakeWeek = math.random(60, 72)
+    -- Set earthquake week (random between the configured weeks)
+    self.time.earthquakeWeek = math.random(Constants.GAME.EARTHQUAKE_MIN_WEEK, 
+                                         Constants.GAME.EARTHQUAKE_MAX_WEEK)
     
     -- Initialize wind direction (random)
     self.environment.wind.currentDirection = self.environment.wind.directions[math.random(#self.environment.wind.directions)]
+    
+    -- Initialize ship stats based on class
+    local stats = shipUtils.getShipBaseStats(self.ship.class)
+    self.ship.speed = stats.speed
+    self.ship.firepower = stats.firepowerDice
+    self.ship.durability = stats.durability
+    self.ship.crewCapacity = stats.crewCapacity
     
     -- Initialize the crew pool
     self:initializeCrewPool()
@@ -4202,6 +10589,13 @@ function GameState:reset()
     self.ship.x = 0
     self.ship.y = 0
     self.ship.isMoving = false
+    
+    -- Reset ship stats based on class
+    local stats = shipUtils.getShipBaseStats(self.ship.class)
+    self.ship.speed = stats.speed
+    self.ship.firepower = stats.firepowerDice
+    self.ship.durability = stats.durability
+    self.ship.crewCapacity = stats.crewCapacity
     
     -- Reset interface modes
     self.settings.portMode = false
@@ -4420,10 +10814,10 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     
     -- With the wind (same direction): reduce travel time
     if travelDirection == windDirection then
-        windModifier = -0.5  -- Half a week faster with the wind
+        windModifier = Constants.GAME.WIND_WITH  -- Faster with the wind
     -- Against the wind (sailing into the wind): +1 week
     elseif travelDirection == oppositeOf[windDirection] then
-        windModifier = 1
+        windModifier = Constants.GAME.WIND_AGAINST
     -- Perpendicular to wind: no modifier
     else
         windModifier = 0
@@ -4435,15 +10829,15 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     -- Apply navigator modifier if present
     local navigatorEffect = ""
     if hasNavigator then
-        travelTime = travelTime - 0.5
+        travelTime = travelTime + Constants.GAME.NAVIGATOR_TRAVEL_BONUS
         navigatorEffect = " with Navigator"
         if self.settings.debug then
-            print("Navigator reducing travel time by 0.5 weeks")
+            print("Navigator reducing travel time by " .. math.abs(Constants.GAME.NAVIGATOR_TRAVEL_BONUS) .. " weeks")
         end
     end
     
-    -- Ensure minimum 0.5 week travel time
-    travelTime = math.max(0.5, travelTime)
+    -- Ensure minimum travel time
+    travelTime = math.max(Constants.GAME.MIN_TRAVEL_TIME, travelTime)
     
     -- Create wind effect description
     local windEffect = ""
@@ -4599,6 +10993,8 @@ local gameMap = require('map')
 local playerShip = require('ship')
 local timeSystem = require('time')
 local portRoyal = require('portRoyal')
+local combatSystem = require('combat')
+local AssetUtils = require('utils.assetUtils')
 
 function love.load()
     -- Load game assets and initialize states
@@ -4615,12 +11011,22 @@ function love.load()
     gameMap:load(gameState)     -- Initialize map 
     playerShip:load(gameState, gameMap)  -- Initialize ship
     portRoyal:load(gameState)   -- Initialize Port Royal interface
+    combatSystem:load(gameState)  -- Initialize combat system
+    
+    -- Store base dimensions for scaling calculations
+    gameState.settings.baseWidth = 800
+    gameState.settings.baseHeight = 600
+    gameState.settings.scale = 1
+    gameState.settings.offsetX = 0
+    gameState.settings.offsetY = 0
     
     -- Set window properties
     love.window.setTitle("Pirate's Wager: Blood for Gold")
     love.window.setMode(800, 600, {
         vsync = true,
-        resizable = false
+        resizable = true,  -- Allow window resizing with letterboxing/pillarboxing
+        minwidth = 400,    -- Minimum window width
+        minheight = 300    -- Minimum window height
     })
 end
 
@@ -4628,8 +11034,11 @@ function love.update(dt)
     -- Early return if game is paused
     if gameState.settings.isPaused then return end
     
-    -- Update game state
-    if gameState.settings.portMode then
+    -- Update game state based on current mode
+    if gameState.settings.combatMode then
+        -- Update naval combat
+        combatSystem:update(dt, gameState)
+    elseif gameState.settings.portMode then
         -- Update port interface
         portRoyal:update(dt, gameState)
     else
@@ -4648,12 +11057,60 @@ function love.update(dt)
         gameMap:load(gameState)
         playerShip:load(gameState, gameMap)
         portRoyal:load(gameState)
+        combatSystem:load(gameState)
+    end
+end
+
+-- Handle window resize events
+function love.resize(w, h)
+    -- Calculate new scale factor to maintain exact 4:3 aspect ratio (800x600)
+    local scaleX = w / gameState.settings.baseWidth
+    local scaleY = h / gameState.settings.baseHeight
+    
+    -- Use the smaller scale to ensure everything fits
+    gameState.settings.scale = math.min(scaleX, scaleY)
+    
+    -- Calculate letterbox or pillarbox dimensions for centering
+    gameState.settings.offsetX = math.floor((w - gameState.settings.baseWidth * gameState.settings.scale) / 2)
+    gameState.settings.offsetY = math.floor((h - gameState.settings.baseHeight * gameState.settings.scale) / 2)
+    
+    -- Print debug info
+    if gameState.settings.debug then
+        print("Window resized to " .. w .. "x" .. h)
+        print("Scale factor: " .. gameState.settings.scale)
+        print("Offset: " .. gameState.settings.offsetX .. ", " .. gameState.settings.offsetY)
     end
 end
 
 function love.draw()
+    local w, h = love.graphics.getDimensions()
+    
+    -- Draw black background for the entire window (for letterboxing/pillarboxing)
+    love.graphics.setColor(0, 0, 0, 1)
+    love.graphics.rectangle("fill", 0, 0, w, h)
+    
+    -- Set up the scaling transformation
+    love.graphics.push()
+    
+    -- Apply offset for letterboxing/pillarboxing
+    love.graphics.translate(gameState.settings.offsetX or 0, gameState.settings.offsetY or 0)
+    
+    -- Apply scaling
+    love.graphics.scale(gameState.settings.scale or 1)
+    
+    -- Set scissor to ensure nothing renders outside our 800x600 game area
+    love.graphics.setScissor(
+        gameState.settings.offsetX,
+        gameState.settings.offsetY,
+        gameState.settings.baseWidth * gameState.settings.scale,
+        gameState.settings.baseHeight * gameState.settings.scale
+    )
+    
     -- Render game based on current mode
-    if gameState.settings.portMode then
+    if gameState.settings.combatMode then
+        -- Draw naval combat
+        combatSystem:draw(gameState)
+    elseif gameState.settings.portMode then
         -- Draw port interface
         portRoyal:draw(gameState)
     else
@@ -4669,31 +11126,83 @@ function love.draw()
     if gameState.settings.debug then
         love.graphics.setColor(1, 1, 1, 1)
         love.graphics.print("FPS: " .. tostring(love.timer.getFPS()), 10, 10)
+        love.graphics.print("Scale: " .. string.format("%.2f", gameState.settings.scale), 10, 30)
+        love.graphics.print("Window: " .. w .. "x" .. h, 10, 50)
+    end
+    
+    -- Clear scissor and end the transformation
+    love.graphics.setScissor()
+    love.graphics.pop()
+    
+    -- Draw letterbox/pillarbox borders if needed
+    if gameState.settings.scale < 1 or w ~= gameState.settings.baseWidth or h ~= gameState.settings.baseHeight then
+        love.graphics.setColor(0.1, 0.1, 0.1, 1) -- Dark gray borders
+        
+        -- Draw edge lines to make the borders more visible
+        love.graphics.setColor(0.3, 0.3, 0.3, 1)
+        -- Top border edge
+        if gameState.settings.offsetY > 0 then
+            love.graphics.rectangle("fill", 0, gameState.settings.offsetY - 1, w, 1)
+        end
+        -- Bottom border edge
+        if gameState.settings.offsetY > 0 then
+            love.graphics.rectangle("fill", 0, gameState.settings.offsetY + (gameState.settings.baseHeight * gameState.settings.scale), w, 1)
+        end
+        -- Left border edge
+        if gameState.settings.offsetX > 0 then
+            love.graphics.rectangle("fill", gameState.settings.offsetX - 1, 0, 1, h)
+        end
+        -- Right border edge
+        if gameState.settings.offsetX > 0 then
+            love.graphics.rectangle("fill", gameState.settings.offsetX + (gameState.settings.baseWidth * gameState.settings.scale), 0, 1, h)
+        end
     end
 end
 
+-- Helper function to convert screen coordinates to game coordinates
+function convertMousePosition(x, y)
+    -- Adjust for the offset and scaling
+    local gameX = (x - (gameState.settings.offsetX or 0)) / (gameState.settings.scale or 1)
+    local gameY = (y - (gameState.settings.offsetY or 0)) / (gameState.settings.scale or 1)
+    
+    return gameX, gameY
+end
+
 function love.mousemoved(x, y)
-    if gameState.settings.portMode then
-        portRoyal:mousemoved(x, y, gameState)
+    -- Convert screen coordinates to game coordinates
+    local gameX, gameY = convertMousePosition(x, y)
+    
+    if gameState.settings.combatMode then
+        combatSystem:mousemoved(gameX, gameY, gameState)
+    elseif gameState.settings.portMode then
+        portRoyal:mousemoved(gameX, gameY, gameState)
     else
-        gameMap:mousemoved(x, y, gameState)
+        gameMap:mousemoved(gameX, gameY, gameState)
     end
 end
 
 function love.mousepressed(x, y, button)
     if gameState.time.isGameOver then return end
     
-    if gameState.settings.portMode then
-        portRoyal:mousepressed(x, y, button, gameState)
+    -- Convert screen coordinates to game coordinates
+    local gameX, gameY = convertMousePosition(x, y)
+    
+    if gameState.settings.combatMode then
+        combatSystem:mousepressed(gameX, gameY, button, gameState)
+    elseif gameState.settings.portMode then
+        portRoyal:mousepressed(gameX, gameY, button, gameState)
     else
-        gameMap:mousepressed(x, y, button, gameState)
+        gameMap:mousepressed(gameX, gameY, button, gameState)
     end
 end
 
 function love.keypressed(key)
     if key == "escape" then
+        -- If in combat mode, end the battle
+        if gameState.settings.combatMode then
+            combatSystem:endBattle(gameState)
         -- If in port mode, return to map
-        if gameState.settings.portMode then
+        elseif gameState.settings.portMode then
             gameState.settings.portMode = false
             gameState.settings.currentPortScreen = "main"
         else
@@ -4701,21 +11210,32 @@ function love.keypressed(key)
         end
     elseif key == "f1" then
         gameState.settings.debug = not gameState.settings.debug
+    elseif key == "f9" and gameState.settings.debug then
+        -- Toggle button hitbox visualization in debug mode
+        if gameState.settings.combatMode then
+            combatSystem.showDebugHitboxes = not combatSystem.showDebugHitboxes
+            print("Button hitboxes: " .. (combatSystem.showDebugHitboxes and "ON" or "OFF"))
+        end
     elseif key == "p" then
         gameState.settings.isPaused = not gameState.settings.isPaused
+    elseif key == "c" and not gameState.settings.combatMode then
+        -- Debug key to start a test battle
+        combatSystem:startBattle(gameState, "sloop")
     end
 end```
 
 ## src/map.lua
 ```lua
 -- Caribbean Map Module
+local AssetUtils = require('utils.assetUtils')
 
 local Map = {
     zones = {},
     hoveredZone = nil,
     -- Base map dimensions
     width = 800,
-    height = 600
+    height = 600,
+    background = nil
 }
 
 -- Zone definitions
@@ -4879,13 +11399,10 @@ function Map:load(gameState)
         end
     end
     
-    -- Load background image if available
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/caribbean_map.png")
-    end)
+    -- Load background image using AssetUtils
+    self.background = AssetUtils.loadImage("assets/caribbean_map.png", "map")
     
-    if success then
-        self.background = result
+    if self.background then
         print("Map background loaded successfully")
     else
         print("Map background image not found. Background will be displayed as blue rectangle.")
@@ -4917,7 +11434,8 @@ function Map:draw(gameState)
         love.graphics.setColor(1, 1, 1, 1)  -- White, fully opaque
         love.graphics.draw(self.background, 0, 0)
     else
-        love.graphics.setColor(0.1, 0.3, 0.5, 1)  -- Deep blue ocean background
+        -- Use deep blue ocean as fallback background
+        love.graphics.setColor(0.1, 0.3, 0.5, 1)
         love.graphics.rectangle("fill", 0, 0, self.width, self.height)
     end
     
@@ -5200,6 +11718,8 @@ return Map```
 -- Port Interface Module
 -- Currently focused on Port Royal but can be extended to all locations
 
+local AssetUtils = require('utils.assetUtils')
+
 local PortRoyal = {
     -- UI constants
     width = 800,
@@ -5297,30 +11817,24 @@ function PortRoyal:load(gameState)
         }
     }
     
-    -- Load placeholder background images if available
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port_royal_main.png")
-    end)
-    if success then
-        self.backgrounds.main = result
+    -- Validate required parameters
+    assert(gameState, "gameState is required for PortRoyal:load")
+    
+    -- Load placeholder background images using AssetUtils
+    self.backgrounds.main = AssetUtils.loadImage("assets/port_royal_main.png", "ui")
+    if self.backgrounds.main then
         print("Port Royal main background loaded")
     end
     
     -- Load tavern background
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port-royal-tavern.png")
-    end)
-    if success then
-        self.backgrounds.tavern = result
+    self.backgrounds.tavern = AssetUtils.loadImage("assets/port-royal-tavern.png", "ui")
+    if self.backgrounds.tavern then
         print("Port Royal tavern background loaded")
     end
     
     -- Load shipyard background
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/port-royal-shipyard.png")
-    end)
-    if success then
-        self.backgrounds.shipyard = result
+    self.backgrounds.shipyard = AssetUtils.loadImage("assets/port-royal-shipyard.png", "ui")
+    if self.backgrounds.shipyard then
         print("Port Royal shipyard background loaded")
     end
 end
@@ -5970,25 +12484,21 @@ function PortRoyal:drawBackground(screen)
     local locationBackground = nil
     
     if screen == "main" then
-        local success, result = pcall(function()
-            return love.graphics.newImage("assets/" .. locationKey .. "_main.png")
-        end)
-        if success then
-            locationBackground = result
-        end
+        -- Use AssetUtils to load the location-specific background
+        locationBackground = AssetUtils.loadImage("assets/" .. locationKey .. "_main.png", "ui")
     end
     
     -- Check if we have a background image for this screen
     if locationBackground then
         -- We have a location-specific background
-        love.graphics.draw(locationBackground, 0, 0)
+        AssetUtils.drawImage(locationBackground, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "main" and self.backgrounds.main then
         -- Fall back to generic port background
-        love.graphics.draw(self.backgrounds.main, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.main, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "tavern" and self.backgrounds.tavern then
-        love.graphics.draw(self.backgrounds.tavern, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.tavern, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     elseif screen == "shipyard" and self.backgrounds.shipyard then
-        love.graphics.draw(self.backgrounds.shipyard, 0, 0)
+        AssetUtils.drawImage(self.backgrounds.shipyard, 0, 0, 0, 1, 1, self.width, self.height, "ui")
     else
         -- Draw a fallback colored background
         if screen == "main" then
@@ -6106,6 +12616,7 @@ return PortRoyal```
 ## src/ship.lua
 ```lua
 -- Ship Module
+local AssetUtils = require('utils.assetUtils')
 
 local Ship = {
     -- Visual properties (display-only, gameplay state is in gameState)
@@ -6126,10 +12637,15 @@ local Ship = {
 
 -- Initialize ship
 function Ship:load(gameState, gameMap)
-    -- Load ship sprites
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Ship:load")
+    assert(gameMap, "gameMap is required for Ship:load")
+    
+    -- Load ship sprites using AssetUtils
     self.sprites = {
-        sloop = love.graphics.newImage("assets/sloop.png")
-        -- Will add brigantine.png and galleon.png when available
+        sloop = AssetUtils.loadImage("assets/sloop.png", "ship"),
+        brigantine = AssetUtils.loadImage("assets/brigantine-top-down.png", "ship"),
+        galleon = nil -- Not yet available
     }
     -- Find Port Royal and set it as starting location
     for i, zone in ipairs(gameMap.zones) do
@@ -6183,32 +12699,29 @@ end
 
 -- Draw the ship
 function Ship:draw(gameState)
+    -- Validate required parameters
+    if not gameState then
+        print("ERROR: gameState is required for Ship:draw")
+        return
+    end
+    
     -- Get the ship's current class (defaulting to sloop for now)
     local shipClass = gameState.ship.class or "sloop"
     local sprite = self.sprites[shipClass]
     
-    -- If sprite exists, draw it centered on the ship's position
+    -- Use AssetUtils to safely draw the ship sprite
     if sprite then
         love.graphics.setColor(1, 1, 1, 1)  -- Full white, no tint
         love.graphics.draw(sprite, gameState.ship.x, gameState.ship.y, 0, 1, 1, 
-                           sprite:getWidth()/2, sprite:getHeight()/2)
+                         sprite:getWidth()/2, sprite:getHeight()/2)
     else
-        -- Fallback to triangular shape if sprite not found
-        love.graphics.setColor(unpack(self.color))
-        
-        -- Draw a triangular ship shape
-        love.graphics.polygon("fill", 
-            gameState.ship.x, gameState.ship.y - self.size,  -- Top point
-            gameState.ship.x - self.size/1.5, gameState.ship.y + self.size/1.5,  -- Bottom left
-            gameState.ship.x + self.size/1.5, gameState.ship.y + self.size/1.5   -- Bottom right
-        )
-        
-        -- Draw outline
-        love.graphics.setColor(0, 0, 0, 0.7)
-        love.graphics.polygon("line", 
-            gameState.ship.x, gameState.ship.y - self.size,
-            gameState.ship.x - self.size/1.5, gameState.ship.y + self.size/1.5,
-            gameState.ship.x + self.size/1.5, gameState.ship.y + self.size/1.5
+        -- Draw a placeholder with the appropriate ship size
+        local width = self.size * 3
+        local height = self.size * 2
+        AssetUtils.drawPlaceholder(
+            gameState.ship.x - width/2, 
+            gameState.ship.y - height/2, 
+            width, height, "ship"
         )
     end
     
@@ -6218,6 +12731,12 @@ end
 
 -- Move ship to a new zone
 function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
+    -- Validate required parameters
+    assert(targetZoneIndex and type(targetZoneIndex) == "number", "targetZoneIndex must be a number")
+    assert(gameState, "gameState is required for Ship:moveToZone")
+    assert(gameMap, "gameMap is required for Ship:moveToZone")
+    assert(targetZoneIndex <= #gameMap.zones, "targetZoneIndex out of bounds")
+    
     if not gameState.ship.isMoving then
         local targetZone = gameMap.zones[targetZoneIndex]
         local currentZone = gameMap.zones[gameState.ship.currentZone]
@@ -6277,6 +12796,11 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
             -- We no longer automatically enter Port Royal
             -- This will be handled by the mooring system instead
             
+            -- Check if we should trigger a random encounter (20% chance)
+            if targetZone.name ~= "Port Royal" and math.random() < 0.2 then
+                self:initiateEncounter(gameState)
+            end
+            
             return true
         else
             print("Cannot move to " .. targetZone.name .. " - not adjacent to current zone")
@@ -6286,6 +12810,38 @@ function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
         print("Ship is already in motion")
         return false
     end
+end
+
+-- Initiate an encounter with an enemy ship
+function Ship:initiateEncounter(gameState)
+    -- In a complete implementation, this would have different encounter types
+    -- and could include narrative events, but for now, we'll focus on combat
+    
+    -- Check if combat system is loaded
+    local combatSystem = require('combat')
+    if not combatSystem then
+        print("Error: Combat system not loaded")
+        return false
+    end
+    
+    -- Determine what type of ship the player encounters
+    local encounterRoll = math.random()
+    local enemyShipClass
+    
+    -- Higher level zones would affect encounter difficulty, but for now:
+    if encounterRoll < 0.6 then
+        enemyShipClass = "sloop"      -- 60% chance of encountering a sloop
+    elseif encounterRoll < 0.9 then
+        enemyShipClass = "brigantine" -- 30% chance of encountering a brigantine
+    else
+        enemyShipClass = "galleon"    -- 10% chance of encountering a galleon
+    end
+    
+    -- Start naval combat
+    print("Encountered an enemy " .. enemyShipClass .. "! Prepare for battle!")
+    combatSystem:startBattle(gameState, enemyShipClass)
+    
+    return true
 end
 
 return Ship```
@@ -6428,7 +12984,393 @@ end
 
 return TimeSystem```
 
+## src/utils/assetUtils.lua
+```lua
+-- Asset Utilities Module
+-- Centralizes asset loading with better error handling
+
+local AssetUtils = {}
+
+-- Default placeholder images for different asset types
+local DEFAULT_PLACEHOLDERS = {
+    ship = {r = 0.2, g = 0.5, b = 0.8}, -- Blue rectangle for ships
+    map = {r = 0.1, g = 0.3, b = 0.2},  -- Green rectangle for map elements
+    ui = {r = 0.4, g = 0.4, b = 0.4},   -- Gray rectangle for UI elements
+    dice = {r = 0.7, g = 0.7, b = 0.2}  -- Yellow rectangle for dice
+}
+
+-- Table to store loaded assets for reference
+AssetUtils.loadedAssets = {}
+
+-- Load an image with error handling
+-- @param filePath - The path to the image file
+-- @param assetType - Type of asset (ship, map, ui, dice) for fallback coloring
+-- @return The loaded image or nil if loading failed
+function AssetUtils.loadImage(filePath, assetType)
+    -- Validate inputs
+    if not filePath then
+        print("ERROR: No file path provided to AssetUtils.loadImage")
+        return nil
+    end
+    
+    -- Normalize asset type
+    assetType = assetType or "ui"
+    
+    -- Check if we've already loaded this asset
+    if AssetUtils.loadedAssets[filePath] then
+        return AssetUtils.loadedAssets[filePath]
+    end
+    
+    -- Try to load the image
+    local success, result = pcall(function() 
+        return love.graphics.newImage(filePath)
+    end)
+    
+    -- Handle the result
+    if success then
+        -- Store the loaded image for future reference
+        AssetUtils.loadedAssets[filePath] = result
+        return result
+    else
+        -- Print detailed error message
+        print("ERROR: Failed to load asset: " .. filePath)
+        print("Reason: " .. tostring(result))
+        return nil
+    end
+end
+
+-- Draw a placeholder rectangle for a missing asset
+-- @param x, y - Position to draw at
+-- @param width, height - Dimensions of the placeholder
+-- @param assetType - Type of asset (ship, map, ui, dice) for coloring
+function AssetUtils.drawPlaceholder(x, y, width, height, assetType)
+    -- Get placeholder color based on asset type
+    local colorDef = DEFAULT_PLACEHOLDERS[assetType] or DEFAULT_PLACEHOLDERS.ui
+    
+    -- Save current color
+    local r, g, b, a = love.graphics.getColor()
+    
+    -- Draw the placeholder
+    love.graphics.setColor(colorDef.r, colorDef.g, colorDef.b, 0.8)
+    love.graphics.rectangle("fill", x, y, width, height)
+    
+    -- Draw a border
+    love.graphics.setColor(1, 1, 1, 0.5)
+    love.graphics.rectangle("line", x, y, width, height)
+    
+    -- Draw a missing texture pattern
+    love.graphics.setColor(1, 0, 1, 0.5) -- Magenta
+    love.graphics.line(x, y, x + width, y + height)
+    love.graphics.line(x + width, y, x, y + height)
+    
+    -- Restore original color
+    love.graphics.setColor(r, g, b, a)
+end
+
+-- Safely draw an image, with fallback to placeholder if image is nil
+-- @param image - The image to draw
+-- @param x, y - Position to draw at
+-- @param angle, sx, sy - Rotation and scale (optional)
+-- @param width, height - Dimensions for placeholder if image is nil
+-- @param assetType - Type of asset for placeholder coloring
+function AssetUtils.drawImage(image, x, y, angle, sx, sy, width, height, assetType)
+    if image then
+        love.graphics.draw(image, x, y, angle or 0, sx or 1, sy or 1)
+    else
+        -- Draw placeholder if image is nil
+        AssetUtils.drawPlaceholder(x, y, width or 32, height or 32, assetType)
+    end
+end
+
+return AssetUtils```
+
+## src/utils/shipUtils.lua
+```lua
+-- Ship Stats Utility Module
+-- Centralizes all ship stat lookups and calculations
+
+local ShipUtils = {}
+
+-- Base stats for each ship class
+local SHIP_BASE_STATS = {
+    sloop = {
+        speed = 3,
+        firepowerDice = 1,
+        durability = 10,
+        crewCapacity = 4,
+        baseCP = 2
+    },
+    brigantine = {
+        speed = 2,
+        firepowerDice = 3,
+        durability = 20,
+        crewCapacity = 8,
+        baseCP = 4
+    },
+    galleon = {
+        speed = 1,
+        firepowerDice = 6,
+        durability = 40,
+        crewCapacity = 12,
+        baseCP = 6
+    }
+}
+
+-- Returns the complete set of base stats for a ship class
+function ShipUtils.getShipBaseStats(shipClass)
+    return SHIP_BASE_STATS[shipClass] or SHIP_BASE_STATS["sloop"]
+end
+
+-- Returns maximum durability (HP) for a ship class
+function ShipUtils.getMaxHP(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.durability or 10
+end
+
+-- Returns base firepower dice for a ship class
+function ShipUtils.getBaseFirepowerDice(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.firepowerDice or 1
+end
+
+-- Returns base movement speed for a ship class
+function ShipUtils.getBaseSpeed(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.speed or 3
+end
+
+-- Returns base crew points (CP) for a ship class
+function ShipUtils.getBaseCP(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.baseCP or 2
+end
+
+-- Returns crew capacity for a ship class
+function ShipUtils.getCrewCapacity(shipClass)
+    local stats = SHIP_BASE_STATS[shipClass]
+    return stats and stats.crewCapacity or 4
+end
+
+return ShipUtils```
+
 # Documentation
+
+## docs/CombatSystem.md
+# Combat System Documentation
+
+## Overview
+
+The combat system implements naval battles on a 10x10 hex grid. Ships of different classes occupy different numbers of hexes and have different movement speeds. The system includes movement mechanics, combat actions, and dice roll mechanics based on the Forged in the Dark system.
+
+## Hex Grid System
+
+The combat grid uses a "pointy-top" hex coordinate system with the following properties:
+
+- Grid size: 10x10 hexes
+- Coordinate system: uses axial coordinates (q,r) where:
+  - q increases from west to east
+  - r increases from northwest to southeast
+  - (0,0) is the top-left hex
+
+## Ship Classes on the Hex Grid
+
+Ship classes have different sizes and shapes on the hex grid:
+
+1. **Sloop (1-Hex Ship)**
+   - Occupies 1 hex
+   - Speed: 3 hexes per turn
+   - Shape: Single hex
+
+2. **Brigantine (2-Hex Ship)**
+   - Occupies 2 hexes in a line
+   - Speed: 2 hexes per turn
+   - Shape: 2 hexes in a row
+
+3. **Galleon (4-Hex Ship)**
+   - Occupies 4 hexes in a kite shape
+   - Speed: 1 hex per turn
+   - Shape: 1 hex bow, 2 hex midship, 1 hex stern
+
+## Combat Flow
+
+1. **Battle Initialization**
+   - Player and enemy ships are placed on opposite sides of the hex grid
+   - Turn order is established (player first)
+
+2. **Movement Phase**
+   - The player can move their ship up to its maximum speed
+   - Movement is done one hex at a time to adjacent hexes
+   - Ships cannot move through occupied hexes
+
+3. **Attack Phase** (not yet implemented)
+   - After movement, ships can attack if in range
+   - Attack success is based on dice rolls from the Forged in the Dark system
+
+4. **End of Turn**
+   - Turn passes to the enemy
+   - The process repeats until one ship is defeated or retreats
+
+## Game State Integration
+
+Combat state is stored in the gameState object under the combat property with the following structure:
+
+```lua
+gameState.combat = {
+    grid = {},  -- 2D array representing the hex grid
+    playerShip = {
+        class = "sloop",  -- Ship class (sloop, brigantine, galleon)
+        size = 1,         -- Number of hexes occupied
+        position = {5, 5}, -- {q, r} coordinates on grid
+        orientation = 0,   -- Direction ship is facing (0-5, for 60° increments)
+        movesRemaining = 3 -- Based on ship speed
+    },
+    enemyShip = {
+        class = "sloop",
+        size = 1,
+        position = {2, 2},
+        orientation = 3,
+        movesRemaining = 3
+    },
+    turn = "player", -- Whose turn is it (player or enemy)
+    phase = "movement", -- Current phase (movement, attack, etc.)
+}
+```
+
+## Controls
+
+- **Mouse Hover**: Highlights hexes on the grid
+- **Click on Player Ship**: Selects the ship and shows valid movement hexes
+- **Click on Valid Movement Hex**: Moves the ship to that hex
+- **ESC Key**: Exits combat mode
+- **C Key**: Debug key to start a test battle
+
+## Triggering Combat
+
+Naval battles can be triggered in two ways:
+
+1. **Random Encounters**: When sailing between zones, there's a 20% chance of encountering an enemy ship
+2. **Debug Mode**: Press 'C' key to start a test battle
+
+## Combat Actions
+
+The combat system includes three core actions:
+
+1. **Fire Cannons**: Attack enemy ships
+   - Uses the ship's firepower attribute to determine number of dice
+   - Each success deals 1 point of damage
+   - Damage is applied to the enemy ship's durability
+
+2. **Evade**: Attempt to dodge enemy attacks
+   - Uses the ship's class to determine number of dice (sloops get more dice)
+   - Each success adds to the ship's evasion rating
+   - Evasion rating reduces damage from attacks
+
+3. **Repair**: Fix damage to the ship
+   - Base 1 die for repairs
+   - Surgeon crew role adds additional dice
+   - Each success restores 5 HP to the ship
+   - Cannot exceed ship's maximum durability
+
+## Dice Mechanics
+
+The combat system uses a dice pool mechanic based on Forged in the Dark:
+
+- Actions roll a number of six-sided dice (d6) based on ship stats, crew, and modifiers
+- Results are categorized:
+  - 6: Full success
+  - 4-5: Partial success
+  - 1-3: Failure
+- Outcome is determined by the highest die result, not the sum:
+  - If any die shows 6, it's a success
+  - If multiple dice show 6, it's a critical success
+  - If the highest die is 4-5, it's a partial success
+  - If no die shows 4+, it's a failure
+- Each outcome level has different effects:
+  - Critical Success: Maximum effect (e.g., 3 damage, 15 HP repair)
+  - Success: Strong effect (e.g., 2 damage, 10 HP repair)
+  - Partial Success: Minimal effect (e.g., 1 damage, 5 HP repair)
+  - Failure: No effect
+
+### Modifiers
+
+The system supports modifiers that add or remove dice from action rolls:
+
+- Positive modifiers add dice to the roll (e.g., "+1 die from Point Blank Range")
+- Negative modifiers remove dice (e.g., "-2 dice from Target Evading")
+- If the total dice count is reduced to 0 or negative, you roll 2 dice and take the worst (lowest) result
+- Modifiers can be temporary (one-time use) or persistent (lasting until cleared)
+
+### Action Types with Modifiers
+
+1. **Fire Cannons**:
+   - Base dice from ship's firepower attribute
+   - +1 die for Point Blank Range (adjacent hex)
+   - Negative dice equal to target's evade score
+
+2. **Evade**:
+   - Base dice from ship's class (sloop=3, brigantine=2, galleon=1)
+   - Result sets ship's evade score until next turn
+   - Evade score reduces attacker's dice when ship is targeted
+
+3. **Repair**:
+   - Base 1 die
+   - Surgeon crew member adds dice equal to their skill level
+
+## Game Flow
+
+1. **Combat Initialization**:
+   - Player and enemy ships are placed on the grid
+   - Ships are given initial stats based on their class
+   - Crew points are allocated based on crew size for the player and ship class for enemies
+
+2. **Turn Structure**:
+   - Each turn consists of a movement phase and an action phase
+   - During movement phase, players can move their ship based on speed
+   - During action phase, players can perform multiple actions based on crew points
+
+3. **Movement Phase**:
+   - Player selects their ship and can move to valid hexes
+   - Movement is limited by the ship's speed stat
+   - Cannot move through occupied hexes
+
+4. **Action Phase**:
+   - Player spends crew points to perform actions
+   - Actions have different costs:
+     - Fire Cannons: 1 CP
+     - Evade: 1 CP
+     - Repair: 2 CP
+   - Multiple actions can be performed as long as crew points are available
+   - Action results are calculated using dice rolls
+   - Enemy AI takes its turn after the player
+
+5. **End of Turn**:
+   - Crew points are replenished for the next turn
+   - Movement points are reset
+
+6. **Combat Resolution**:
+   - Combat ends when one ship is destroyed (0 durability)
+   - Player can also retreat from battle
+
+## Crew Point System
+
+The crew point system connects ship crew size to combat actions:
+
+- Each ship has a maximum number of crew points equal to its crew size
+- The player's ship CP is based on the number of crew members
+- Enemy ships' CP is based on their class (sloop=2, brigantine=4, galleon=6)
+- Crew points are spent to perform actions during the action phase
+- This creates an action economy where players must decide which actions are most important
+- Larger ships with more crew can perform more actions each turn
+- Creates a strategic layer where ship size and crew complement affect combat capability
+
+## Future Enhancements
+
+1. **Ship Orientation**: Implement proper ship orientation and rotation
+2. **Wind Effects**: Integrate with the wind system for movement modifiers
+3. **Boarding**: Add boarding mechanics for crew-vs-crew combat
+4. **Visual Improvements**: Add proper ship sprites and battle animations
+5. **Advanced Actions**: Ram, board, special abilities
+6. **Crew Integration**: Deeper crew role impacts on combat
 
 ## docs/CrewSystem.md
 # Crew System Documentation
@@ -7417,10 +14359,10 @@ Description: A versatile, mid-sized ship that balances speed and strength.
 Suitable for a wide range of pirate activities.
 Hex Size and Shape: 2 hexes in a straight line, sleek and narrow.
 Stats:
-Speed: 2 hexes per turn (3 with favorable wind)
-Firepower: 6 cannons (3 dice per attack)
+Speed: 2 hexes per turn (Movement Phase)
+Firepower Dice: 3 dice per 'Fire Cannons' action. (Aligned with Design Doc) (Actual cannons: 6)
 Durability: 20 HP
-Crew Capacity: 8 members
+Crew Capacity: 8 members (Max 8 CP per turn) (Added CP link)
 Tactical Role: A jack-of-all-trades ship, capable of raiding, boarding, or 
 engaging in sustained combat.
 Flavor: A weathered vessel with a history of battles, its deck adorned 
@@ -7433,10 +14375,10 @@ kite shape provides a broad profile for devastating broadsides.
 Hex Size and Shape: 4 hexes in a kite arrangement (1 hex bow, 2 hexes 
 midship, 1 hex stern), wide and imposing.
 Stats:
-Speed: 1 hex per turn (2 with favorable wind)
-Firepower: 12 cannons (6 dice per attack)
+Speed: 1 hex per turn (Movement Phase)
+Firepower Dice: 6 dice per 'Fire Cannons' action. (Aligned with Design Doc) (Actual cannons: 12)
 Durability: 40 HP
-Crew Capacity: 12 members
+Crew Capacity: 12 members (Max 12 CP per turn) (Added CP link)
 Tactical Role: A slow but powerful ship that excels in head-on combat and 
 intimidation. Requires careful positioning due to its size.
 Flavor: An ornate, battle-scarred behemoth, its deck laden with gold and 
@@ -7460,7 +14402,7 @@ Upgrades: Players can enhance speed, firepower, or durability within each
 class to suit their playstyle.
 5. Mechanics Deep Dive
 5.1 Crew System
-Crew Roles: Navigator, Gunner, Surgeon, etc., boosting specific actions.
+Crew Roles: Navigator, Gunner, Surgeon, etc., boosting specific actions (e.g., Navigator reduces travel time, Surgeon adds dice to Repair, Gunner adds dice to Fire Cannons). (Added Gunner effect intent)
 Character Sheet:
 Role: Defines specialty.
 Skill Level: 1-5, adding dice/bonuses to rolls.
@@ -7470,7 +14412,7 @@ Health: Hit points; injuries occur in combat.
 Boon/Bane: One positive trait (e.g., “Sharp-Eyed”) and one negative (e.g., 
 “Cursed”).
 Recruitment: Found in taverns or via quests; elite crew require high 
-reputation.
+reputation. Hiring costs gold. (Clarified hiring cost)
 5.2 Item System
 Types:
 Resources: Bulk goods (e.g., rum, timber) tracked numerically.
@@ -7489,8 +14431,8 @@ Impact: Affects opportunities, crew recruitment, and events.
 5.4 Passage of Time
 Timeline: 72 weeks, with the earthquake striking randomly between weeks 
 60-72.
-At Sea: Zone movement or major actions cost 1 week.
-In Port: Actions take 1-3 weeks (e.g., 1 for repairs, 2 for investments).
+At Sea: Zone movement costs time (base 1 week, modified by wind/crew). Major actions like specific exploration events might cost time. Combat itself does not advance the week counter, but initiating it might if tied to an action. (Clarified time costs)
+In Port: Actions take 1-3 weeks (e.g., 1 for basic repairs, 2 for investments, 1 for recruiting). (Confirmed port time costs)
 Hints: NPC rumors and tremors escalate as the quake approaches.
 5.5 Economic Systems
 Trade Routes: Buy low, sell high across ports with dynamic pricing.
@@ -7507,9 +14449,9 @@ Purpose: A streamlined hub for management and prep with flavorful
 immersion.
 7. Combat System
 Hex Grid: 10x10 hexes; ships sized 1-4 hexes based on class.
-Movement: Varies by ship class (see "Ship Classes").
-Actions: Two per turn (movement + combat/utility).
-Dice Pools: 1-5 d6s for attacks, evasion, etc.
+Turn Structure: Movement Phase (spend move points based on Speed) followed by Action Phase (spend Crew Points). (Aligned with Section 3.1)
+Actions: Core actions (Fire, Evade, Repair) cost CP (1/1/2 respectively). Others TBD. (Aligned with Section 3.1)
+Dice Pools: 1-5 d6s for attacks, evasion, etc., based on ship, crew (e.g., Gunner skill for Fire, Surgeon for Repair), and context. (Added crew skill links)
 Boarding Actions: Side-view crew combat.
 8. Modular Systems
 Ship Customization: Hulls, sails, cannons with unique stats (e.g., speed, 
@@ -8170,4 +15112,210 @@ Test with the existing wind mechanics (e.g., Navigator + "with wind" = 0.5
 weeks minimum).
 Update GameState:advanceTime calls in ship.lua to reflect the new travel 
 time.
+
+## Tickets/3-1-implement-hex-grid-battlefield.md
+Description:
+
+Develop a 10x10 hex grid for naval battles, including ship placement and 
+movement mechanics.
+
+Tasks:
+
+Create a hex grid data structure (e.g., a 10x10 array) to represent the 
+battle area in a new combat.lua module.
+Implement functions to place ships on the grid, respecting their size (1 
+hex for Sloop, 2 for Brigantine, 4 for Galleon, per the design doc).
+Develop movement logic allowing ships to move to adjacent hexes based on 
+their speed stat (e.g., Sloop = 3 hexes/turn).
+Acceptance Criteria:
+
+A 10x10 hex grid is visible during battles (placeholder visuals OK for 
+now).
+Player and enemy ships can be placed on the grid at the start of combat.
+Player ship can move to adjacent hexes during a turn, respecting speed 
+limits.
+Notes:
+
+Use GameState.ship.class to determine size and speed (e.g., Sloop: 3 
+hexes, 1 hex size).
+Store combat state in a new GameState.combat table (e.g., { grid, 
+playerShip, enemyShip }).
+No wind effects yet; add in Sprint 6.
+
+## Tickets/3-2-implement-basic-combat-actions.md
+Description:
+
+Add core combat actions (Fire Cannons, Evade, Repair) integrated with the 
+dice mechanics.
+
+Tasks:
+
+Define action functions in combat.lua:
+fireCannons: Deals damage based on firepower (e.g., Sloop = 2).
+evade: Attempts to dodge incoming attacks.
+repair: Restores hull HP (e.g., 5 HP per success).
+Integrate dice rolls (from Ticket 3.3) into each action, using ship/crew 
+stats.
+Apply outcomes (e.g., damage dealt, evasion success) to ship stats in 
+GameState.combat.
+Acceptance Criteria:
+
+Players can select and perform Fire Cannons, Evade, or Repair during their 
+turn.
+Each action triggers a dice roll with appropriate outcomes (e.g., Fire 
+Cannons deals damage on success).
+Ship stats (e.g., durability) update correctly based on action results.
+Notes:
+
+Use placeholder stats for now (e.g., 1 die per action); refine with crew 
+skills in later sprints.
+Depends on Ticket 3.3 for dice mechanics.
+
+## Tickets/3-3-develop-dice-mechanics.md
+Description:
+
+Create a system to roll dice based on crew and ship stats, interpreting 
+results per the design doc.
+
+Tasks:
+
+Implement a rollDice(numDice) function in combat.lua that rolls 1-5 d6s 
+and returns results.
+Define success criteria: 6 = Success, 4-5 = Partial Success, 1-3 = 
+Failure.
+Calculate outcomes (e.g., count successes) and return them for use in 
+actions.
+Acceptance Criteria:
+
+Dice rolls generate correct results (e.g., rolling 3d6 might yield [6, 4, 
+2]).
+Results are interpreted accurately (e.g., 6 = 1 success, 4 = 0.5 success).
+The system integrates with combat actions (e.g., Fire Cannons uses roll 
+results).
+Notes:
+
+For Sprint 3, use a fixed number of dice (e.g., 1 per cannon for Fire 
+Cannons) or basic crew stats from GameState.crew.members.
+Expand with crew skills (e.g., Gunner adds dice) in Sprint 6.
+
+## Tickets/3-4-add-simple-enemy-ai.md
+Description:
+
+Develop basic AI for enemy ships to move and perform actions during 
+battles.
+
+Tasks:
+
+Create an AI function in combat.lua to select actions (e.g., move toward 
+player, Fire Cannons if in range).
+Implement simple rules (e.g., attack if within 3 hexes, else move closer).
+Alternate turns between player and AI in the combat loop.
+Acceptance Criteria:
+
+Enemy ships move and act during their turns (e.g., move 1 hex, fire if 
+close).
+AI behavior is predictable (e.g., always attacks when in range).
+Turns alternate smoothly between player and AI.
+Notes:
+
+Use a basic enemy ship (e.g., Sloop stats: 1 hex, 2 firepower, 10 HP).
+Depends on Tickets 3.1 and 3.2 for grid and actions.
+
+## Tickets/3-5-design-combat-ui.md
+Description:
+
+Create a user interface to display ship stats, action options, and dice 
+results during battles.
+
+Tasks:
+
+Design UI elements in combat.lua:
+Ship stats (e.g., "HP: 10/10").
+Action buttons (Fire Cannons, Evade, Repair).
+Dice result display (e.g., "Rolled: 6, 4 → Success, Partial Success").
+Update UI based on game state changes (e.g., HP decreases after damage).
+Ensure readability within the 800x600 retro style.
+Acceptance Criteria:
+
+UI shows player and enemy ship stats (HP, position).
+Action buttons are clickable and trigger corresponding actions.
+Dice results display after each action (e.g., "Rolled: 6 → Success").
+Notes:
+
+Use placeholder art; refine in Sprint 10.
+Refer to Game Boy Advance games (e.g., Fire Emblem) for low-res UI 
+inspiration.
+Depends on Tickets 3.2 and 3.3.
+
+## Tickets/3-6-integrate-combat-system-with-exploration.md
+Description:
+
+Modify the map and ship modules to trigger battles when encountering enemy 
+ships.
+
+Tasks:
+
+Add a GameState.enemyShips table to track enemy ship locations (e.g., { 
+zone = 2, class = "Sloop" }).
+Update ship.lua to detect enemy ships in the same zone during movement 
+(check GameState.ship.currentZone).
+Transition to combat mode by setting a GameState.settings.combatMode flag 
+and initializing GameState.combat.
+Acceptance Criteria:
+
+Battles start automatically when the player moves to a zone with an enemy 
+ship.
+Game transitions smoothly from exploration to combat mode (UI switches to 
+combat screen).
+Notes:
+
+Spawn one test enemy in a fixed zone (e.g., "Nassau") for now.
+Depends on Ticket 3.1 for combat setup.
+
+## Tickets/3-7-create-pixel-art-assets-for-combat-system.md
+Description:
+
+Design and implement pixel art for the hex grid and ship sprites during 
+battles.
+
+Tasks:
+
+Create hex tile graphics (e.g., hex_tile.png) for the 10x10 grid.
+Design or reuse ship sprites (e.g., sloop.png, brigantine.png) from Sprint 
+1, ensuring visibility on the grid.
+Integrate assets into combat.lua for rendering.
+Acceptance Criteria:
+
+Hex grid is visible and fits the retro aesthetic (e.g., simple outlines).
+Ship sprites are clear and distinguishable on the grid (e.g., Sloop vs. 
+enemy Sloop).
+Notes:
+
+Collaborate with the art team for consistency with Sprint 1 assets.
+Use low-res constraints (e.g., 16x16 hex tiles).
+
+## Tickets/3-8-handle-post-battle-outcomes.md
+Description:
+
+Implement logic to resolve battles, distribute loot, and return to 
+exploration mode.
+
+Tasks:
+
+Define outcomes in combat.lua:
+Win: Enemy HP ≤ 0.
+Loss: Player HP ≤ 0 (game over for now).
+Escape: Player moves off grid (dice roll TBD in Sprint 6).
+Award loot (e.g., 10 gold) on win via GameState:addResources.
+Update GameState.combat and transition back to GameState.settings.portMode 
+= false.
+Acceptance Criteria:
+
+Game returns to exploration mode after a battle ends.
+Loot (e.g., 10 gold) is added to GameState.resources.gold on victory.
+Ship damage persists (e.g., HP carries over) until repaired.
+Notes:
+
+Keep outcomes simple (e.g., fixed loot); expand in Sprint 4.
+Loss condition can trigger a game over screen; refine later.
 

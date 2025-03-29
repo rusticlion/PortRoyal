@@ -1,4 +1,5 @@
 -- Ship Module
+local AssetUtils = require('utils.assetUtils')
 
 local Ship = {
     -- Visual properties (display-only, gameplay state is in gameState)
@@ -19,10 +20,15 @@ local Ship = {
 
 -- Initialize ship
 function Ship:load(gameState, gameMap)
-    -- Load ship sprites
+    -- Validate required parameters
+    assert(gameState, "gameState is required for Ship:load")
+    assert(gameMap, "gameMap is required for Ship:load")
+    
+    -- Load ship sprites using AssetUtils
     self.sprites = {
-        sloop = love.graphics.newImage("assets/sloop.png")
-        -- Will add brigantine.png and galleon.png when available
+        sloop = AssetUtils.loadImage("assets/sloop.png", "ship"),
+        brigantine = AssetUtils.loadImage("assets/brigantine-top-down.png", "ship"),
+        galleon = nil -- Not yet available
     }
     -- Find Port Royal and set it as starting location
     for i, zone in ipairs(gameMap.zones) do
@@ -76,32 +82,29 @@ end
 
 -- Draw the ship
 function Ship:draw(gameState)
+    -- Validate required parameters
+    if not gameState then
+        print("ERROR: gameState is required for Ship:draw")
+        return
+    end
+    
     -- Get the ship's current class (defaulting to sloop for now)
     local shipClass = gameState.ship.class or "sloop"
     local sprite = self.sprites[shipClass]
     
-    -- If sprite exists, draw it centered on the ship's position
+    -- Use AssetUtils to safely draw the ship sprite
     if sprite then
         love.graphics.setColor(1, 1, 1, 1)  -- Full white, no tint
         love.graphics.draw(sprite, gameState.ship.x, gameState.ship.y, 0, 1, 1, 
-                           sprite:getWidth()/2, sprite:getHeight()/2)
+                         sprite:getWidth()/2, sprite:getHeight()/2)
     else
-        -- Fallback to triangular shape if sprite not found
-        love.graphics.setColor(unpack(self.color))
-        
-        -- Draw a triangular ship shape
-        love.graphics.polygon("fill", 
-            gameState.ship.x, gameState.ship.y - self.size,  -- Top point
-            gameState.ship.x - self.size/1.5, gameState.ship.y + self.size/1.5,  -- Bottom left
-            gameState.ship.x + self.size/1.5, gameState.ship.y + self.size/1.5   -- Bottom right
-        )
-        
-        -- Draw outline
-        love.graphics.setColor(0, 0, 0, 0.7)
-        love.graphics.polygon("line", 
-            gameState.ship.x, gameState.ship.y - self.size,
-            gameState.ship.x - self.size/1.5, gameState.ship.y + self.size/1.5,
-            gameState.ship.x + self.size/1.5, gameState.ship.y + self.size/1.5
+        -- Draw a placeholder with the appropriate ship size
+        local width = self.size * 3
+        local height = self.size * 2
+        AssetUtils.drawPlaceholder(
+            gameState.ship.x - width/2, 
+            gameState.ship.y - height/2, 
+            width, height, "ship"
         )
     end
     
@@ -111,6 +114,12 @@ end
 
 -- Move ship to a new zone
 function Ship:moveToZone(targetZoneIndex, gameState, gameMap)
+    -- Validate required parameters
+    assert(targetZoneIndex and type(targetZoneIndex) == "number", "targetZoneIndex must be a number")
+    assert(gameState, "gameState is required for Ship:moveToZone")
+    assert(gameMap, "gameMap is required for Ship:moveToZone")
+    assert(targetZoneIndex <= #gameMap.zones, "targetZoneIndex out of bounds")
+    
     if not gameState.ship.isMoving then
         local targetZone = gameMap.zones[targetZoneIndex]
         local currentZone = gameMap.zones[gameState.ship.currentZone]

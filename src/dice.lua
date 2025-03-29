@@ -1,6 +1,10 @@
 -- Dice Module
 -- Implements a reusable dice system for Forged in the Dark mechanics
 
+-- Import constants
+local Constants = require('constants')
+local AssetUtils = require('utils.assetUtils')
+
 local Dice = {
     -- Sprite sheet for dice
     spriteSheet = nil,
@@ -11,14 +15,10 @@ local Dice = {
 
 -- Initialize dice system
 function Dice:init()
-    -- Try to load dice sprite sheet
-    local success, result = pcall(function()
-        return love.graphics.newImage("assets/dice-strip.png")
-    end)
+    -- Load dice sprite sheet using AssetUtils
+    self.spriteSheet = AssetUtils.loadImage("assets/dice-strip.png", "dice")
     
-    if success then
-        self.spriteSheet = result
-        
+    if self.spriteSheet then
         -- Create quads for each die face
         for i = 0, 5 do
             self.quads[i+1] = love.graphics.newQuad(
@@ -30,7 +30,7 @@ function Dice:init()
         
         print("Dice sprite sheet loaded successfully")
     else
-        print("Dice sprite sheet not found. Will use text representation.")
+        print("Will use text representation for dice")
     end
 end
 
@@ -141,10 +141,10 @@ function Dice:interpret(diceResults)
         outcome.highestValue = math.max(outcome.highestValue, die)
         
         -- Categorize results
-        if die == 6 then
+        if die == Constants.DICE.SUCCESS then
             -- Success
             outcome.successes = outcome.successes + 1
-        elseif die >= 4 and die <= 5 then
+        elseif die >= Constants.DICE.PARTIAL_MIN and die <= Constants.DICE.PARTIAL_MAX then
             -- Partial success
             outcome.partials = outcome.partials + 1
         else
@@ -159,19 +159,19 @@ function Dice:interpret(diceResults)
     if outcome.successes >= 2 then
         -- Critical success (2+ dice showing 6)
         outcome.result = "critical"
-        outcome.level = 3
+        outcome.level = Constants.DICE.OUTCOME_CRITICAL
     elseif outcome.successes == 1 then
         -- Full success (1 die showing 6)
         outcome.result = "success"
-        outcome.level = 2
+        outcome.level = Constants.DICE.OUTCOME_SUCCESS
     elseif outcome.partials > 0 then
         -- Partial success (highest die is 4-5)
         outcome.result = "partial"
-        outcome.level = 1
+        outcome.level = Constants.DICE.OUTCOME_PARTIAL
     else
         -- Failure (no dice showing 4+)
         outcome.result = "failure"
-        outcome.level = 0
+        outcome.level = Constants.DICE.OUTCOME_FAILURE
     end
     
     return outcome
@@ -209,14 +209,178 @@ function Dice:draw(diceResults, x, y, scale)
         love.graphics.setColor(1, 1, 1, 1)
         for i, value in ipairs(diceResults) do
             local dieX = x + (i-1) * (width + padding)
-            love.graphics.draw(
-                self.spriteSheet,
-                self.quads[value],
-                dieX,
-                y,
-                0,  -- rotation
-                scale, scale  -- scale x, y
-            )
+            if self.spriteSheet and self.quads[value] then
+                love.graphics.draw(
+                    self.spriteSheet,
+                    self.quads[value],
+                    dieX,
+                    y,
+                    0,  -- rotation
+                    scale, scale  -- scale x, y
+                )
+            else
+                -- Draw placeholder if sprite sheet or quad is missing
+                AssetUtils.drawPlaceholder(dieX, y, self.spriteWidth * scale, self.spriteHeight * scale, "dice")
+            end
+        end
+    end
+    
+    -- Return the total width used by the dice
+    return #diceResults * (self.spriteWidth * scale + padding)
+end
+
+-- Draw dice results with highlighting for dice that "count"
+function Dice:drawWithHighlight(diceResults, x, y, scale)
+    local scale = scale or 1
+    local padding = 4 * scale
+    local width = self.spriteWidth * scale
+    local outcome = self:interpret(diceResults)
+    
+    -- If no sprite sheet, use text representation
+    if not self.spriteSheet then
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (20 * scale + padding)
+            local dieY = y
+            
+            -- Apply bump to dice that count
+            if (value == 6 and outcome.successes > 0) or 
+               (value >= 4 and value <= 5 and outcome.successes == 0 and outcome.partials > 0) or
+               (value <= 3 and outcome.successes == 0 and outcome.partials == 0) then
+                -- This die "counts" - bump it up
+                dieY = y - 5 * scale
+                
+                -- Add glow/shadow for highlighted dice
+                love.graphics.setColor(1, 1, 1, 0.3)
+                love.graphics.rectangle("fill", dieX - 2, dieY - 2, 24 * scale, 24 * scale, 5, 5)
+            end
+            
+            -- Draw die background based on value
+            if value == 6 then
+                love.graphics.setColor(0.2, 0.8, 0.2, 0.8) -- Green for success
+            elseif value >= 4 then
+                love.graphics.setColor(0.8, 0.8, 0.2, 0.8) -- Yellow for partial
+            else
+                love.graphics.setColor(0.8, 0.2, 0.2, 0.8) -- Red for failure
+            end
+            
+            love.graphics.rectangle("fill", dieX, dieY, 20 * scale, 20 * scale, 3, 3)
+            
+            -- Draw die value
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.print(value, dieX + 7 * scale, dieY + 4 * scale)
+        end
+    else
+        -- Use sprite sheet
+        love.graphics.setColor(1, 1, 1, 1)
+        for i, value in ipairs(diceResults) do
+            local dieX = x + (i-1) * (width + padding)
+            local dieY = y
+            
+            -- Determine if this die should be highlighted (counts toward the outcome)
+            local shouldHighlight = false
+            
+            -- Critical success - all 6s count
+            if outcome.result == "critical" and value == Constants.DICE.SUCCESS then
+                shouldHighlight = true
+            -- Regular success - only one 6 counts (use the first one found)
+            elseif outcome.result == "success" and value == Constants.DICE.SUCCESS then
+                -- If we haven't yet highlighted a success die
+                if not outcome.hasHighlightedSuccess then
+                    shouldHighlight = true
+                    outcome.hasHighlightedSuccess = true
+                end
+            -- Partial success - only 4-5s count if there are no 6s
+            -- Always highlight the highest value die (4 or 5)
+            elseif outcome.result == "partial" then
+                -- Find the highest partial success die (4-5)
+                if not outcome.highestPartialValue then
+                    outcome.highestPartialValue = 0
+                    for _, v in ipairs(diceResults) do
+                        if v >= Constants.DICE.PARTIAL_MIN and v <= Constants.DICE.PARTIAL_MAX and v > outcome.highestPartialValue then
+                            outcome.highestPartialValue = v
+                        end
+                    end
+                end
+                
+                -- Highlight only the highest partial success die
+                if value == outcome.highestPartialValue and not outcome.hasHighlightedPartial then
+                    shouldHighlight = true
+                    outcome.hasHighlightedPartial = true
+                end
+            -- Failure - highlight the highest die (still a failure, but clearer)
+            elseif outcome.result == "failure" then
+                -- Find the highest die (which is still ≤ 3 for a failure)
+                if not outcome.highestFailureValue then
+                    outcome.highestFailureValue = 0
+                    for _, v in ipairs(diceResults) do
+                        if v <= Constants.DICE.FAILURE_MAX and v > outcome.highestFailureValue then
+                            outcome.highestFailureValue = v
+                        end
+                    end
+                end
+                
+                -- Highlight only the highest failure die
+                if value == outcome.highestFailureValue and not outcome.hasHighlightedFailure then
+                    shouldHighlight = true
+                    outcome.hasHighlightedFailure = true
+                end
+            end
+            
+            -- Apply bump to dice that count
+            if shouldHighlight then
+                -- This die "counts" - bump it up
+                dieY = y - 8 * scale
+            end
+            
+            -- Check if we can draw the die using the spritesheet
+            if self.spriteSheet and self.quads[value] then
+                -- Draw the die with appropriate highlight
+                love.graphics.setColor(1, 1, 1, 1)
+                if shouldHighlight then
+                    -- Add shadow for 3D effect
+                    love.graphics.setColor(0.3, 0.3, 0.3, 0.5)
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX + 2,
+                        dieY + 2,
+                        0,  -- rotation
+                        scale, scale  -- scale x, y
+                    )
+                    
+                    -- Draw highlighted die slightly larger
+                    love.graphics.setColor(1, 1, 1, 1)
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX,
+                        dieY,
+                        0,  -- rotation
+                        scale * 1.1, scale * 1.1  -- slightly larger scale
+                    )
+                else
+                    -- Draw regular die
+                    love.graphics.draw(
+                        self.spriteSheet,
+                        self.quads[value],
+                        dieX,
+                        dieY,
+                        0,  -- rotation
+                        scale, scale  -- scale x, y
+                    )
+                end
+            else
+                -- Draw placeholder if sprite sheet or quad is missing
+                local placeholderHeight = self.spriteHeight * (shouldHighlight and scale * 1.1 or scale)
+                local placeholderWidth = self.spriteWidth * (shouldHighlight and scale * 1.1 or scale)
+                
+                AssetUtils.drawPlaceholder(dieX, dieY, placeholderWidth, placeholderHeight, "dice")
+                
+                -- Draw the die value as text in the center of the placeholder
+                love.graphics.setColor(1, 1, 1, 1)
+                love.graphics.print(value, dieX + placeholderWidth/2 - 5, dieY + placeholderHeight/2 - 8)
+            end
         end
     end
     
@@ -240,13 +404,13 @@ end
 -- Get result color
 function Dice:getResultColor(outcome)
     if outcome.result == "critical" then
-        return {0.2, 0.9, 0.2, 1} -- Bright green
+        return Constants.COLORS.HEALTH -- Bright green
     elseif outcome.result == "success" then
-        return {0.2, 0.8, 0.2, 1} -- Green
+        return Constants.COLORS.PLAYER_SHIP -- Green
     elseif outcome.result == "partial" then
-        return {0.8, 0.8, 0.2, 1} -- Yellow
+        return Constants.COLORS.GOLD -- Yellow
     else
-        return {0.8, 0.2, 0.2, 1} -- Red
+        return Constants.COLORS.DAMAGE -- Red
     end
 end
 

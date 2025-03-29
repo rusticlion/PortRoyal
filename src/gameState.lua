@@ -1,6 +1,12 @@
 -- Game State Module
 -- Central repository for game state that needs to be accessed across modules
 
+-- Import ship utils
+local shipUtils = require('utils.shipUtils')
+
+-- Import constants
+local Constants = require('constants')
+
 local GameState = {
     -- Player ship information
     ship = {
@@ -10,38 +16,39 @@ local GameState = {
         x = 0,
         y = 0,
         isMoving = false,
-        -- Ship stats
-        speed = 3,          -- Hexes per turn in combat (future feature)
-        firepower = 2,      -- Number of cannons
-        durability = 10,    -- Hull hit points
-        crewCapacity = 4    -- Maximum crew size
+        -- Ship stats will be initialized based on class in init()
+        speed = nil,
+        firepower = nil,
+        durability = nil,
+        crewCapacity = nil
     },
     
     -- Time tracking
     time = {
         currentWeek = 1,
-        totalWeeks = 72,
+        totalWeeks = Constants.GAME.TOTAL_WEEKS,
         earthquakeWeek = nil,  -- Set during initialization
         isGameOver = false
     },
     
     -- Player resources
     resources = {
-        gold = 50,          -- Starting gold
-        rum = 0,
-        timber = 0,
-        gunpowder = 0
+        gold = Constants.GAME.DEFAULT_GOLD,          -- Starting gold
+        rum = Constants.GAME.DEFAULT_RUM,
+        timber = Constants.GAME.DEFAULT_TIMBER,
+        gunpowder = Constants.GAME.DEFAULT_GUNPOWDER
     },
     
-    -- Inventory system (10 slots for cargo and special items)
+    -- Inventory system for cargo and special items
     inventory = {
-        slots = {}          -- Will contain inventory slot objects
+        slots = {},         -- Will contain inventory slot objects
+        capacity = Constants.GAME.DEFAULT_INVENTORY_SLOTS
     },
     
     -- Crew management
     crew = {
         members = {},       -- Will contain crew member objects
-        morale = 5,         -- Scale 1-10
+        morale = Constants.GAME.DEFAULT_MORALE,  -- Scale 1-10
         
         -- Global crew pool - tracks all possible crew members in the game
         -- Each crew member has a unique ID
@@ -96,11 +103,19 @@ function GameState:init()
     -- Seed random number generator
     math.randomseed(os.time())
     
-    -- Set earthquake week (random between weeks 60-72)
-    self.time.earthquakeWeek = math.random(60, 72)
+    -- Set earthquake week (random between the configured weeks)
+    self.time.earthquakeWeek = math.random(Constants.GAME.EARTHQUAKE_MIN_WEEK, 
+                                         Constants.GAME.EARTHQUAKE_MAX_WEEK)
     
     -- Initialize wind direction (random)
     self.environment.wind.currentDirection = self.environment.wind.directions[math.random(#self.environment.wind.directions)]
+    
+    -- Initialize ship stats based on class
+    local stats = shipUtils.getShipBaseStats(self.ship.class)
+    self.ship.speed = stats.speed
+    self.ship.firepower = stats.firepowerDice
+    self.ship.durability = stats.durability
+    self.ship.crewCapacity = stats.crewCapacity
     
     -- Initialize the crew pool
     self:initializeCrewPool()
@@ -288,6 +303,13 @@ function GameState:reset()
     self.ship.x = 0
     self.ship.y = 0
     self.ship.isMoving = false
+    
+    -- Reset ship stats based on class
+    local stats = shipUtils.getShipBaseStats(self.ship.class)
+    self.ship.speed = stats.speed
+    self.ship.firepower = stats.firepowerDice
+    self.ship.durability = stats.durability
+    self.ship.crewCapacity = stats.crewCapacity
     
     -- Reset interface modes
     self.settings.portMode = false
@@ -506,10 +528,10 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     
     -- With the wind (same direction): reduce travel time
     if travelDirection == windDirection then
-        windModifier = -0.5  -- Half a week faster with the wind
+        windModifier = Constants.GAME.WIND_WITH  -- Faster with the wind
     -- Against the wind (sailing into the wind): +1 week
     elseif travelDirection == oppositeOf[windDirection] then
-        windModifier = 1
+        windModifier = Constants.GAME.WIND_AGAINST
     -- Perpendicular to wind: no modifier
     else
         windModifier = 0
@@ -521,15 +543,15 @@ function GameState:calculateTravelTime(fromZoneIdx, toZoneIdx, map)
     -- Apply navigator modifier if present
     local navigatorEffect = ""
     if hasNavigator then
-        travelTime = travelTime - 0.5
+        travelTime = travelTime + Constants.GAME.NAVIGATOR_TRAVEL_BONUS
         navigatorEffect = " with Navigator"
         if self.settings.debug then
-            print("Navigator reducing travel time by 0.5 weeks")
+            print("Navigator reducing travel time by " .. math.abs(Constants.GAME.NAVIGATOR_TRAVEL_BONUS) .. " weeks")
         end
     end
     
-    -- Ensure minimum 0.5 week travel time
-    travelTime = math.max(0.5, travelTime)
+    -- Ensure minimum travel time
+    travelTime = math.max(Constants.GAME.MIN_TRAVEL_TIME, travelTime)
     
     -- Create wind effect description
     local windEffect = ""
