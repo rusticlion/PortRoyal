@@ -65,6 +65,10 @@ local Constants = {
         CP_COST_EVADE = 1,                      -- Evade costs 1 CP
         CP_COST_REPAIR = 2,                     -- Repair costs 2 CP
         
+        -- Sail Point (SP) Costs
+        SP_COST_MOVE_HEX = 1,                   -- Cost to move one hex
+        SP_COST_ROTATE_60 = 1,                  -- Cost to rotate 60 degrees
+        
         -- Damage Values
         DAMAGE_CRITICAL = 3,                    -- Critical hit damage
         DAMAGE_SUCCESS = 2,                     -- Success damage

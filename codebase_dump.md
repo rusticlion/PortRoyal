@@ -1,5 +1,5 @@
 # PortRoyal Codebase Dump
-Generated: Sat Mar 29 16:41:44 CDT 2025
+Generated: Sun Mar 30 22:14:28 CDT 2025
 
 # Source Code
 
@@ -34,6 +34,13 @@ local Combat = {
     hoveredHex = nil,   -- Currently hovered hex coordinates {q, r}
     selectedHex = nil,  -- Currently selected hex coordinates
     validMoves = {},    -- Valid move targets for selected ship
+    
+    -- SP planning phase variables
+    plannedRotation = nil,  -- Temporary storage for rotation during planning
+    hoveredMoveHex = nil,   -- Hex being hovered during movement planning
+    plannedMoveHex = nil,   -- Hex selected as destination during planning
+    rotationButtons = nil,  -- UI elements for rotation controls
+    confirmManeuverButton = nil, -- UI element for confirm button
     
     -- Active battle data (will be stored in gameState.combat)
     -- Included here as reference/documentation
@@ -151,7 +158,12 @@ function Combat:initBattle(gameState, enemyShipClass)
             hasActed = false,  -- Whether ship has performed an action this turn
             modifiers = {},    -- Active modifiers
             crewPoints = gameState.crew.members and #gameState.crew.members or 1, -- Available crew points for actions
-            maxCrewPoints = gameState.crew.members and #gameState.crew.members or 1  -- Maximum crew points per turn
+            maxCrewPoints = gameState.crew.members and #gameState.crew.members or 1,  -- Maximum crew points per turn
+            -- New SP and maneuver planning fields
+            currentSP = self:getMaxSP(playerShipClass),
+            maxSP = self:getMaxSP(playerShipClass),
+            plannedMove = nil, -- Will store destination hex {q, r}
+            plannedRotation = nil -- Will store target orientation (0-5)
         },
         enemyShip = {
             class = enemyShipClass or "sloop", -- Default to sloop if not specified
@@ -164,10 +176,15 @@ function Combat:initBattle(gameState, enemyShipClass)
             hasActed = false,  -- Whether ship has performed an action this turn
             modifiers = {},    -- Active modifiers
             crewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop"), -- Based on ship class
-            maxCrewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop")
+            maxCrewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop"),
+            -- New SP and maneuver planning fields
+            currentSP = self:getMaxSP(enemyShipClass or "sloop"),
+            maxSP = self:getMaxSP(enemyShipClass or "sloop"),
+            plannedMove = nil, -- Will store destination hex {q, r}
+            plannedRotation = nil -- Will store target orientation (0-5)
         },
         turn = "player",
-        phase = "movement",
+        phase = "playerMovePlanning", -- Updated to new phase system
         actionResult = nil,    -- Stores result of the last action
         turnCount = 1          -- Track number of turns
     }
@@ -178,6 +195,16 @@ function Combat:initBattle(gameState, enemyShipClass)
     
     -- Store battle in gameState
     gameState.combat = battle
+    
+    -- Process initial enemy planning for first turn
+    self:processEnemyPlanning(battle)
+    
+    -- Always set up initial valid moves for player (regardless of phase)
+    print("Calculating initial valid moves for player ship")
+    self.validMoves = {}
+    self.selectedHex = {battle.playerShip.position[1], battle.playerShip.position[2]}
+    self:calculateValidMoves(battle, battle.playerShip)
+    print("Initial calculation found " .. #self.validMoves .. " valid moves")
     
     print("New naval battle initialized: " .. playerShipClass .. " vs " .. (enemyShipClass or "sloop"))
     return battle
@@ -280,6 +307,7 @@ function Combat:getHexFromScreen(x, y)
             -- Check if this is in the hex (hexagons have radius = self.HEX_RADIUS)
             if dist <= self.HEX_RADIUS then
                 -- Inside this hex - return immediately
+                print("Found exact hex at " .. q .. "," .. r .. " (distance: " .. dist .. ")")
                 return {q, r}
             end
             
@@ -291,12 +319,14 @@ function Combat:getHexFromScreen(x, y)
         end
     end
     
-    -- If mouse is close enough to the grid, return the closest hex
-    if minDistance < self.HEX_RADIUS * 2 then
+    -- For debugging: Always return the closest hex, regardless of distance
+    if closestHex then
+        print("Returning closest hex " .. closestHex[1] .. "," .. closestHex[2] .. " (distance: " .. minDistance .. ")")
         return closestHex
     end
     
     -- Mouse is too far from any hex
+    print("No hex found near " .. x .. "," .. y)
     return nil
 end
 
@@ -325,7 +355,202 @@ function math.round(x)
     return x >= 0 and math.floor(x + 0.5) or math.ceil(x - 0.5)
 end
 
+-- Mouse click handler for the playerMovePlanning phase
+function Combat:handleManeuverPlanningClick(x, y, battle)
+    -- Debug info
+    print("Handling maneuver planning click at " .. x .. "," .. y)
+    
+    -- If rotation buttons are visible and clicked
+    if self.plannedMoveHex and self.rotationButtons then
+        -- Check if Rotate Left button is clicked
+        if self:isPointInRect(x, y, self.rotationButtons.rotateLeft) then
+            print("Rotate left button clicked")
+            -- Rotate left (counter-clockwise)
+            if self.plannedRotation == nil then
+                -- If no rotation is set yet, start from the current ship orientation
+                self.plannedRotation = (battle.playerShip.orientation - 1) % 6
+            else
+                -- Otherwise, just rotate from the current planned orientation
+                self.plannedRotation = (self.plannedRotation - 1) % 6
+            end
+            print("New rotation: " .. self.plannedRotation)
+            return true
+        end
+        
+        -- Check if Rotate Right button is clicked
+        if self:isPointInRect(x, y, self.rotationButtons.rotateRight) then
+            print("Rotate right button clicked")
+            -- Rotate right (clockwise)
+            if self.plannedRotation == nil then
+                -- If no rotation is set yet, start from the current ship orientation
+                self.plannedRotation = (battle.playerShip.orientation + 1) % 6
+            else
+                -- Otherwise, just rotate from the current planned orientation
+                self.plannedRotation = (self.plannedRotation + 1) % 6
+            end
+            print("New rotation: " .. self.plannedRotation)
+            return true
+        end
+    end
+    
+    -- Check if Confirm button is clicked
+    if self.plannedMoveHex and self.plannedRotation and self.confirmManeuverButton then
+        if self:isPointInRect(x, y, self.confirmManeuverButton) then
+            print("Confirm button clicked")
+            -- Calculate SP cost
+            local cost = self:calculateSPCost(battle.playerShip, self.plannedMoveHex[1], self.plannedMoveHex[2], self.plannedRotation)
+            
+            -- Check if player has enough SP
+            if cost <= battle.playerShip.currentSP then
+                print("Confirming maneuver - cost: " .. cost .. " SP")
+                -- Store planned move and rotation in ship data
+                battle.playerShip.plannedMove = {self.plannedMoveHex[1], self.plannedMoveHex[2]}
+                battle.playerShip.plannedRotation = self.plannedRotation
+                
+                -- Advance to the next phase (maneuver resolution)
+                self:advanceToNextPhase(battle)
+                return true
+            else
+                -- Not enough SP - provide feedback
+                print("Not enough Sail Points for this maneuver!")
+                return true
+            end
+        end
+    end
+    
+    -- Check if a hex on the grid was clicked
+    print("Attempting to get hex from screen coordinates: " .. x .. "," .. y)
+    
+    -- First check if player ship is already selected
+    if not self.selectedHex then
+        -- Auto-select player ship to show valid moves
+        print("Auto-selecting player ship")
+        self.selectedHex = {battle.playerShip.position[1], battle.playerShip.position[2]}
+        self:calculateValidMoves(battle, battle.playerShip)
+    end
+    
+    -- Get clicked hex
+    local clickedHex = self:getHexFromScreen(x, y)
+    if clickedHex then
+        local q, r = clickedHex[1], clickedHex[2]
+        print("Clicked hex: " .. q .. "," .. r)
+        
+        -- Check if clicked hex is a valid move
+        if self:isValidMove(q, r) then
+            print("Valid move selected at " .. q .. "," .. r)
+            -- Store as planned move destination
+            self.plannedMoveHex = {q, r}
+            
+            -- If no rotation planned yet, initialize it to current orientation
+            if not self.plannedRotation then
+                self.plannedRotation = battle.playerShip.orientation
+                print("Set initial rotation to current orientation: " .. self.plannedRotation)
+            end
+            
+            return true
+        elseif battle.grid[q] and battle.grid[q][r] and battle.grid[q][r].isPlayerShip then
+            print("Player ship selected at " .. q .. "," .. r)
+            -- If player clicked their ship, select it to show valid moves
+            self.selectedHex = {q, r}
+            
+            -- Calculate and store valid moves for selected ship
+            self:calculateValidMoves(battle, battle.playerShip)
+            
+            return true
+        else
+            print("Hex is not a valid move or player ship")
+            
+            -- Try recalculating valid moves in case they weren't set properly
+            if #self.validMoves == 0 and self.selectedHex then
+                print("Recalculating valid moves")
+                self:calculateValidMoves(battle, battle.playerShip)
+            end
+        end
+    else
+        print("No hex found at click position")
+    end
+    
+    return false
+end
+
+-- Helper function to check if a point is inside a rectangle
+function Combat:isPointInRect(x, y, rect)
+    return x >= rect.x and x <= rect.x + rect.width and
+           y >= rect.y and y <= rect.y + rect.height
+end
+
 -- Get neighbors of a hex
+-- Calculate valid moves for SP-based movement
+function Combat:calculateValidMoves(battle, ship)
+    self.validMoves = {} -- Clear previous valid moves
+    
+    -- Get the ship's current position and SP
+    local shipQ, shipR = ship.position[1], ship.position[2]
+    local availableSP = ship.currentSP
+    
+    print("Calculating valid moves for ship at " .. shipQ .. "," .. shipR .. " with " .. availableSP .. " SP")
+    
+    -- Each SP allows moving 1 hex, so the maximum distance we can move is equal to availableSP
+    local maxDistance = availableSP
+    
+    -- Initialize an empty valid moves list
+    self.validMoves = {}
+    
+    -- Loop through all grid cells within maxDistance
+    for q = math.max(0, shipQ - maxDistance), math.min(self.GRID_SIZE - 1, shipQ + maxDistance) do
+        for r = math.max(0, shipR - maxDistance), math.min(self.GRID_SIZE - 1, shipR + maxDistance) do
+            -- Skip the ship's current position
+            if q ~= shipQ or r ~= shipR then
+                -- Calculate distance between ship and this hex
+                local distance = self:hexDistance(shipQ, shipR, q, r)
+                
+                -- Check if within movement range
+                if distance <= maxDistance then
+                    -- Check if the hex is empty (no ships)
+                    if battle.grid[q] and battle.grid[q][r] and 
+                       not (battle.grid[q][r].isPlayerShip or battle.grid[q][r].isEnemyShip) then
+                        -- This is a valid move destination, add it to valid moves
+                        table.insert(self.validMoves, {q, r})
+                        print("Added valid move: " .. q .. "," .. r .. " (distance: " .. distance .. ")")
+                    else
+                        print("Hex " .. q .. "," .. r .. " occupied or out of bounds")
+                    end
+                else
+                    print("Hex " .. q .. "," .. r .. " too far (distance: " .. distance .. ")")
+                end
+            end
+        end
+    end
+    
+    -- Force some valid moves for debugging!
+    if #self.validMoves == 0 then
+        print("NO VALID MOVES FOUND - FORCING SOME FOR DEBUGGING")
+        
+        -- Add some moves adjacent to the ship
+        local directions = {
+            {1, 0}, {1, -1}, {0, -1}, 
+            {-1, 0}, {-1, 1}, {0, 1}
+        }
+        
+        for _, dir in ipairs(directions) do
+            local newQ = shipQ + dir[1]
+            local newR = shipR + dir[2]
+            
+            -- Check if within grid bounds
+            if newQ >= 0 and newQ < self.GRID_SIZE and newR >= 0 and newR < self.GRID_SIZE then
+                -- Check if empty
+                if not (battle.grid[newQ][newR].isPlayerShip or battle.grid[newQ][newR].isEnemyShip) then
+                    table.insert(self.validMoves, {newQ, newR})
+                    print("FORCED valid move: " .. newQ .. "," .. newR)
+                end
+            end
+        end
+    end
+    
+    -- Print debug summary
+    print("Calculated " .. #self.validMoves .. " valid moves for ship with " .. availableSP .. " SP")
+end
+
 function Combat:getHexNeighbors(q, r)
     local neighbors = {}
     
@@ -445,7 +670,454 @@ function Combat:offsetToCube(q, r)
     return x, y, z
 end
 
+-- Calculate direction vector from one hex to another
+function Combat:calculateDirectionVector(fromQ, fromR, toQ, toR)
+    -- Normalize the direction
+    local dirQ = toQ - fromQ
+    local dirR = toR - fromR
+    
+    -- Simple normalization
+    local length = math.sqrt(dirQ*dirQ + dirR*dirR)
+    if length > 0 then
+        dirQ = dirQ / length
+        dirR = dirR / length
+    end
+    
+    return {q = dirQ, r = dirR}
+end
+
+-- Get maximum Sail Points for a ship class
+function Combat:getMaxSP(shipClass)
+    -- Max SP values based on ship class as defined in RevisedCombatSystem.md
+    if shipClass == "sloop" then
+        return 5
+    elseif shipClass == "brigantine" then
+        return 4
+    elseif shipClass == "galleon" then
+        return 3
+    else
+        return 5 -- Default to sloop if unknown class
+    end
+end
+
+-- Calculate the SP cost of a planned maneuver
+function Combat:calculateSPCost(ship, targetQ, targetR, targetOrientation)
+    local spCost = 0
+    
+    -- Movement cost: SP_COST_MOVE_HEX per hex moved
+    if targetQ and targetR then
+        local distance = self:hexDistance(ship.position[1], ship.position[2], targetQ, targetR)
+        spCost = spCost + (distance * Constants.COMBAT.SP_COST_MOVE_HEX)
+    end
+    
+    -- Rotation cost: SP_COST_ROTATE_60 per 60° orientation change
+    if targetOrientation ~= nil then
+        -- Calculate the shortest rotation distance between current and target orientation
+        local currentOrientation = ship.orientation
+        local rotationDistance = math.min(
+            math.abs(targetOrientation - currentOrientation),
+            6 - math.abs(targetOrientation - currentOrientation)
+        )
+        spCost = spCost + (rotationDistance * Constants.COMBAT.SP_COST_ROTATE_60)
+    end
+    
+    return spCost
+end
+
 -- Convert hex coordinates to screen coordinates
+function Combat:hexToScreen(q, r)
+    -- For pointy-top hexagons
+    local hexWidth = self.HEX_RADIUS * math.sqrt(3)
+    local hexHeight = self.HEX_RADIUS * 2
+    
+    -- Calculate the total grid size in pixels
+    -- For a pointy-top hex grid with brick layout pattern
+    local gridWidthInHexes = self.GRID_SIZE
+    local gridHeightInHexes = self.GRID_SIZE
+    
+    -- Total width = width of a column of hexes * number of columns
+    local totalGridWidth = hexWidth * gridWidthInHexes
+    -- Total height = height of a hex * number of rows, accounting for overlap
+    local totalGridHeight = hexHeight * 0.75 * gridHeightInHexes + hexHeight * 0.25
+    
+    -- Make sure we have proper grid center coordinates
+    -- This should be exactly the center of the available play area
+    local centerX = self.gridOffsetX
+    local centerY = self.gridOffsetY
+    
+    -- Calculate grid origin (top-left corner of the hex grid itself)
+    -- This centers the actual hex grid within whatever panel is showing it
+    local gridOriginX = centerX - (totalGridWidth / 2)
+    local gridOriginY = centerY - (totalGridHeight / 2)
+    
+    -- Calculate the position for this specific hex
+    local hexX = gridOriginX + (q * hexWidth)
+    local hexY = gridOriginY + (r * hexHeight * 0.75)
+    
+    -- Apply horizontal offset for odd rows (brick pattern layout)
+    if r % 2 == 1 then
+        hexX = hexX + (hexWidth / 2)
+    end
+    
+    return hexX, hexY
+end
+
+function Combat:startNewTurn(battle)
+    -- Increment turn counter
+    battle.turnCount = battle.turnCount + 1
+    
+    -- Replenish Sail Points and Crew Points for both ships
+    self:replenishResources(battle.playerShip)
+    self:replenishResources(battle.enemyShip)
+    
+    -- Clear planned moves and rotations
+    battle.playerShip.plannedMove = nil
+    battle.playerShip.plannedRotation = nil
+    battle.enemyShip.plannedMove = nil
+    battle.enemyShip.plannedRotation = nil
+    
+    -- Reset temporary planning variables in the Combat module
+    self.plannedRotation = nil
+    self.hoveredMoveHex = nil
+    self.plannedMoveHex = nil
+    self.rotationButtons = nil
+    self.confirmManeuverButton = nil
+    
+    -- Clear any temporary turn-based effects
+    battle.playerShip.evadeScore = 0
+    battle.enemyShip.evadeScore = 0
+    
+    -- Set the initial phase for the new turn - enemy planning happens internally
+    battle.phase = "playerMovePlanning"
+    
+    print("Starting new turn " .. battle.turnCount)
+end
+
+-- Replenish a ship's resources (SP and CP) at the start of a turn
+function Combat:replenishResources(ship)
+    -- Replenish Sail Points to maximum
+    ship.currentSP = ship.maxSP
+    
+    -- Replenish Crew Points to maximum
+    ship.crewPoints = ship.maxCrewPoints
+    
+    -- Reset action flags
+    ship.hasActed = false
+end
+
+-- Process enemy ship's planning phase (internal AI logic)
+function Combat:processEnemyPlanning(battle)
+    -- Get enemy and player ships
+    local enemyShip = battle.enemyShip
+    local playerShip = battle.playerShip
+    
+    -- Get enemy position and orientation
+    local enemyQ, enemyR = enemyShip.position[1], enemyShip.position[2]
+    local enemyOrientation = enemyShip.orientation
+    
+    -- Calculate health percentage for strategy selection
+    local maxHealth = shipUtils.getMaxHP(enemyShip.class)
+    local healthPercent = enemyShip.durability / maxHealth
+    
+    -- Choose strategy based on health
+    local strategy
+    if healthPercent < 0.3 then
+        strategy = "defensive" -- Run away when critically damaged
+    elseif healthPercent < 0.7 then
+        strategy = "cautious"  -- Maintain medium distance when moderately damaged
+    else
+        strategy = "aggressive" -- Get close when healthy
+    end
+    
+    -- Plan target destination and orientation
+    local targetQ, targetR, targetOrientation = self:planEnemyManeuver(battle, strategy, enemyShip)
+    
+    -- Calculate SP cost for the planned maneuver
+    local moveCost = self:calculateSPCost(enemyShip, targetQ, targetR, nil)
+    local rotateCost = self:calculateSPCost(enemyShip, nil, nil, targetOrientation)
+    local totalCost = moveCost + rotateCost
+    
+    -- Check if the maneuver is affordable
+    if totalCost <= enemyShip.currentSP then
+        -- Store the planned move and rotation
+        enemyShip.plannedMove = {targetQ, targetR}
+        enemyShip.plannedRotation = targetOrientation
+        print("Enemy planning: Move to " .. targetQ .. "," .. targetR .. ", rotate to " .. targetOrientation .. " (SP cost: " .. totalCost .. ")")
+    else
+        -- If unaffordable, try simpler fallback options
+        print("Enemy's preferred maneuver costs " .. totalCost .. " SP, which exceeds available " .. enemyShip.currentSP .. " SP. Using fallback plan.")
+        
+        -- Try just rotation, no movement
+        if rotateCost <= enemyShip.currentSP then
+            enemyShip.plannedMove = {enemyQ, enemyR} -- Stay in place
+            enemyShip.plannedRotation = targetOrientation
+            print("Enemy fallback plan: Stay in place, rotate to " .. targetOrientation .. " (SP cost: " .. rotateCost .. ")")
+        
+        -- Try just movement, no rotation
+        elseif moveCost <= enemyShip.currentSP then
+            enemyShip.plannedMove = {targetQ, targetR}
+            enemyShip.plannedRotation = enemyOrientation -- Keep current orientation
+            print("Enemy fallback plan: Move to " .. targetQ .. "," .. targetR .. ", keep orientation " .. enemyOrientation .. " (SP cost: " .. moveCost .. ")")
+        
+        -- If still unaffordable, do nothing
+        else
+            enemyShip.plannedMove = {enemyQ, enemyR} -- Stay in place
+            enemyShip.plannedRotation = enemyOrientation -- Keep current orientation
+            print("Enemy fallback plan: Do nothing (insufficient SP for any meaningful maneuver)")
+        end
+    end
+end
+
+-- Plan the enemy's maneuver based on the selected strategy
+function Combat:planEnemyManeuver(battle, strategy, enemyShip)
+    local playerShip = battle.playerShip
+    local enemyQ, enemyR = enemyShip.position[1], enemyShip.position[2]
+    local playerQ, playerR = playerShip.position[1], playerShip.position[2]
+    
+    -- Calculate direction to player
+    local directionToPlayer = self:calculateDirectionVector(enemyQ, enemyR, playerQ, playerR)
+    
+    -- Calculate distance to player
+    local distanceToPlayer = self:hexDistance(enemyQ, enemyR, playerQ, playerR)
+    
+    -- Plan target position
+    local targetQ, targetR
+    
+    if strategy == "defensive" then
+        -- Move away from player
+        targetQ = enemyQ - directionToPlayer.q
+        targetR = enemyR - directionToPlayer.r
+        
+        -- Clamp to grid bounds
+        targetQ = math.max(0, math.min(self.GRID_SIZE - 1, targetQ))
+        targetR = math.max(0, math.min(self.GRID_SIZE - 1, targetR))
+        
+    elseif strategy == "cautious" then
+        -- Maintain medium distance (3 hexes) from player
+        if distanceToPlayer < 3 then
+            -- Too close, move away a bit
+            targetQ = enemyQ - directionToPlayer.q
+            targetR = enemyR - directionToPlayer.r
+        elseif distanceToPlayer > 3 then
+            -- Too far, move closer a bit
+            targetQ = enemyQ + directionToPlayer.q
+            targetR = enemyR + directionToPlayer.r
+        else
+            -- Just right, strafe around player
+            -- Simple strafing: move perpendicular to player direction
+            targetQ = enemyQ + directionToPlayer.r
+            targetR = enemyR - directionToPlayer.q
+        end
+        
+        -- Clamp to grid bounds
+        targetQ = math.max(0, math.min(self.GRID_SIZE - 1, targetQ))
+        targetR = math.max(0, math.min(self.GRID_SIZE - 1, targetR))
+        
+    else -- "aggressive"
+        -- Move towards player, but stop 1 hex away (for firing)
+        if distanceToPlayer > 2 then
+            targetQ = enemyQ + directionToPlayer.q
+            targetR = enemyR + directionToPlayer.r
+        else
+            -- Already close enough, stay in place
+            targetQ = enemyQ
+            targetR = enemyR
+        end
+    end
+    
+    -- Round to nearest integer for hex coordinates
+    targetQ = math.floor(targetQ + 0.5)
+    targetR = math.floor(targetR + 0.5)
+    
+    -- Plan target orientation - face towards player
+    local targetOrientation = self:calculateOrientationTowards(enemyQ, enemyR, playerQ, playerR)
+    
+    return targetQ, targetR, targetOrientation
+end
+
+-- Calculate the orientation needed to face from one hex towards another
+function Combat:calculateOrientationTowards(fromQ, fromR, toQ, toR)
+    -- Convert to cube coordinates
+    local fromX, fromY, fromZ = self:offsetToCube(fromQ, fromR)
+    local toX, toY, toZ = self:offsetToCube(toQ, toR)
+    
+    -- Calculate direction vector in cube coordinates
+    local dirX = toX - fromX
+    local dirY = toY - fromY
+    local dirZ = toZ - fromZ
+    
+    -- Normalize to get the primary direction
+    local length = math.max(math.abs(dirX), math.abs(dirY), math.abs(dirZ))
+    if length > 0 then
+        dirX = dirX / length
+        dirY = dirY / length
+        dirZ = dirZ / length
+    end
+    
+    -- Map the direction to the closest of the 6 orientations
+    -- This is a simple mapping based on the angle
+    local angle = math.atan2(dirY, dirX)
+    local orientation = math.floor((angle + math.pi) / (math.pi/3)) % 6
+    
+    return orientation
+end
+
+-- Move to the next phase of combat
+function Combat:advanceToNextPhase(battle)
+    -- The phase progression according to RevisedCombatSystem.md:
+    -- 1. Start of Turn (replenish resources)
+    -- 2. Enemy Planning Phase (internal)
+    -- 3. Player Planning Phase (Movement & Rotation) - "playerMovePlanning"
+    -- 4. Resolution Phase (Maneuver) - "maneuverResolution"
+    -- 5. Player Planning Phase (Action) - "playerActionPlanning"
+    -- 6. Resolution Phase (Action) - "actionResolution" or "displayingResult"
+    -- 7. End of Turn -> back to 1
+    
+    -- Current phase determines the next phase
+    if battle.phase == "playerMovePlanning" then
+        -- After player commits a movement plan, advance to maneuver resolution
+        battle.phase = "maneuverResolution"
+        
+        -- Immediately process the maneuver resolution (with animation in the draw function)
+        self:processManeuverResolution(battle)
+        
+    elseif battle.phase == "maneuverResolution" then
+        -- After maneuvers resolve, advance to player action planning
+        battle.phase = "playerActionPlanning"
+        
+    elseif battle.phase == "playerActionPlanning" then
+        -- This transition happens when player confirms an action
+        battle.phase = "actionResolution"
+        
+    elseif battle.phase == "actionResolution" then
+        -- After action resolution, show results
+        battle.phase = "displayingResult"
+        
+    elseif battle.phase == "displayingResult" then
+        -- After player dismisses results, there could be more enemy actions
+        -- or we end the turn
+        -- For now, just end the turn
+        self:startNewTurn(battle)
+        
+        -- Process enemy planning for the new turn
+        self:processEnemyPlanning(battle)
+    end
+    
+    print("Combat phase advanced to: " .. battle.phase)
+end
+
+-- Process maneuver resolution phase
+function Combat:processManeuverResolution(battle)
+    -- Check if both ships have planned moves and rotations
+    if not battle.playerShip.plannedMove or not battle.playerShip.plannedRotation or
+       not battle.enemyShip.plannedMove or not battle.enemyShip.plannedRotation then
+        print("Cannot process maneuver resolution: Missing planned moves or rotations")
+        return false
+    end
+    
+    -- Extract planned moves and rotations
+    local playerStartQ, playerStartR = battle.playerShip.position[1], battle.playerShip.position[2]
+    local playerTargetQ, playerTargetR = battle.playerShip.plannedMove[1], battle.playerShip.plannedMove[2]
+    local playerStartOrientation = battle.playerShip.orientation
+    local playerTargetOrientation = battle.playerShip.plannedRotation
+    
+    local enemyStartQ, enemyStartR = battle.enemyShip.position[1], battle.enemyShip.position[2]
+    local enemyTargetQ, enemyTargetR = battle.enemyShip.plannedMove[1], battle.enemyShip.plannedMove[2]
+    local enemyStartOrientation = battle.enemyShip.orientation
+    local enemyTargetOrientation = battle.enemyShip.plannedRotation
+    
+    -- 1. Update orientations immediately
+    battle.playerShip.orientation = playerTargetOrientation
+    battle.enemyShip.orientation = enemyTargetOrientation
+    
+    -- 2. Check for collision at target destination
+    local collision = false
+    local playerFinalQ, playerFinalR = playerTargetQ, playerTargetR
+    local enemyFinalQ, enemyFinalR = enemyTargetQ, enemyTargetR
+    
+    if playerTargetQ == enemyTargetQ and playerTargetR == enemyTargetR then
+        -- Collision detected - both ships trying to move to the same hex
+        collision = true
+        
+        -- Simple collision rule: both ships stop 1 hex short along their path
+        -- Calculate player's adjusted position
+        local playerDirection = self:calculateDirectionVector(playerStartQ, playerStartR, playerTargetQ, playerTargetR)
+        local playerDistance = self:hexDistance(playerStartQ, playerStartR, playerTargetQ, playerTargetR)
+        
+        if playerDistance > 1 then
+            -- If moving more than 1 hex, stop 1 hex short
+            playerFinalQ = math.floor(playerTargetQ - playerDirection.q + 0.5)
+            playerFinalR = math.floor(playerTargetR - playerDirection.r + 0.5)
+        else
+            -- If only moving 1 hex, stay in place
+            playerFinalQ, playerFinalR = playerStartQ, playerStartR
+        end
+        
+        -- Calculate enemy's adjusted position
+        local enemyDirection = self:calculateDirectionVector(enemyStartQ, enemyStartR, enemyTargetQ, enemyTargetR)
+        local enemyDistance = self:hexDistance(enemyStartQ, enemyStartR, enemyTargetQ, enemyTargetR)
+        
+        if enemyDistance > 1 then
+            -- If moving more than 1 hex, stop 1 hex short
+            enemyFinalQ = math.floor(enemyTargetQ - enemyDirection.q + 0.5)
+            enemyFinalR = math.floor(enemyTargetR - enemyDirection.r + 0.5)
+        else
+            -- If only moving 1 hex, stay in place
+            enemyFinalQ, enemyFinalR = enemyStartQ, enemyStartR
+        end
+        
+        print("Collision detected! Ships stopped short of destination.")
+    end
+    
+    -- 3. Calculate actual SP costs for the moves performed
+    local playerActualMoveCost = self:calculateSPCost(
+        {position = {playerStartQ, playerStartR}, orientation = playerStartOrientation},
+        playerFinalQ, playerFinalR, nil
+    )
+    
+    local playerActualRotationCost = self:calculateSPCost(
+        {position = {playerStartQ, playerStartR}, orientation = playerStartOrientation},
+        nil, nil, playerTargetOrientation
+    )
+    
+    local enemyActualMoveCost = self:calculateSPCost(
+        {position = {enemyStartQ, enemyStartR}, orientation = enemyStartOrientation},
+        enemyFinalQ, enemyFinalR, nil
+    )
+    
+    local enemyActualRotationCost = self:calculateSPCost(
+        {position = {enemyStartQ, enemyStartR}, orientation = enemyStartOrientation},
+        nil, nil, enemyTargetOrientation
+    )
+    
+    -- 4. Deduct SP
+    battle.playerShip.currentSP = math.max(0, battle.playerShip.currentSP - (playerActualMoveCost + playerActualRotationCost))
+    battle.enemyShip.currentSP = math.max(0, battle.enemyShip.currentSP - (enemyActualMoveCost + enemyActualRotationCost))
+    
+    -- 5. Remove ships from their old grid positions
+    self:clearShipFromGrid(battle.grid, battle.playerShip)
+    self:clearShipFromGrid(battle.grid, battle.enemyShip)
+    
+    -- 6. Update ship positions
+    battle.playerShip.position = {playerFinalQ, playerFinalR}
+    battle.enemyShip.position = {enemyFinalQ, enemyFinalR}
+    
+    -- 7. Place ships at their new grid positions
+    self:placeShipOnGrid(battle.grid, battle.playerShip, battle)
+    self:placeShipOnGrid(battle.grid, battle.enemyShip, battle)
+    
+    -- 8. Clear planned moves and rotations (no longer needed)
+    battle.playerShip.plannedMove = nil
+    battle.playerShip.plannedRotation = nil
+    battle.enemyShip.plannedMove = nil
+    battle.enemyShip.plannedRotation = nil
+    
+    -- 9. Advance to next phase (Action Planning)
+    self:advanceToNextPhase(battle)
+    
+    return true
+end
+
 function Combat:hexToScreen(q, r)
     -- For pointy-top hexagons
     local hexWidth = self.HEX_RADIUS * math.sqrt(3)
@@ -629,6 +1301,10 @@ function Combat:drawHexes(battle, showDebug)
                 -- Red for enemy ship (more transparent)
                 love.graphics.setColor(Constants.COLORS.ENEMY_SHIP[1], Constants.COLORS.ENEMY_SHIP[2], 
                                       Constants.COLORS.ENEMY_SHIP[3], 0.5)
+            elseif self.plannedMoveHex and self.plannedMoveHex[1] == q and self.plannedMoveHex[2] == r then
+                -- Green/yellow pulsing for planned destination
+                local pulse = math.abs(math.sin(love.timer.getTime() * 2))
+                love.graphics.setColor(0.3 + pulse * 0.6, 0.7 + pulse * 0.3, 0.2, 0.6 + pulse * 0.4)
             elseif self.hoveredHex and self.hoveredHex[1] == q and self.hoveredHex[2] == r then
                 love.graphics.setColor(Constants.COLORS.HOVER) -- Yellow for hover
             elseif self.selectedHex and self.selectedHex[1] == q and self.selectedHex[2] == r then
@@ -670,11 +1346,22 @@ end
 
 -- Check if hex coordinates are in the valid moves list
 function Combat:isValidMove(q, r)
-    for _, move in ipairs(self.validMoves) do
+    -- Debug logging
+    print("Checking if " .. q .. "," .. r .. " is a valid move. Current valid moves: " .. #self.validMoves)
+    
+    if not self.validMoves or #self.validMoves == 0 then
+        print("No valid moves available")
+        return false
+    end
+    
+    for i, move in ipairs(self.validMoves) do
         if move[1] == q and move[2] == r then
+            print("Valid move found: " .. q .. "," .. r .. " (index " .. i .. ")")
             return true
         end
     end
+    
+    print("Not a valid move: " .. q .. "," .. r)
     return false
 end
 
@@ -749,7 +1436,8 @@ function Combat:drawShipByClass(ship, isPlayer, isSelected, battle)
     local sprite = self.shipSprites[shipClass]
     
     -- Angle based on orientation (60 degrees per orientation step)
-    local angle = orientation * math.pi / 3
+    -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+    local angle = orientation * math.pi / 3 + math.pi / 6
     
     if sprite then
         -- Draw the sprite with proper orientation and scale
@@ -828,7 +1516,8 @@ function Combat:drawShipIconForUI(x, y, shipClass, orientation, isPlayer, isSele
     local sprite = self.shipSprites[shipClass]
     
     -- Angle based on orientation (60 degrees per orientation step)
-    local angle = orientation * math.pi / 3
+    -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+    local angle = orientation * math.pi / 3 + math.pi / 6
     
     if sprite then
         -- Draw the sprite with proper orientation and scale
@@ -938,7 +1627,8 @@ function Combat:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, o
         }
         
         -- Adjust rotation based on orientation
-        local angle = orientation * math.pi / 3
+        -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+        local angle = orientation * math.pi / 3 + math.pi / 6
         
         -- Rotate and translate points
         local rotatedPoints = {}
@@ -973,7 +1663,8 @@ function Combat:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, o
         }
         
         -- Adjust rotation based on orientation
-        local angle = orientation * math.pi / 3
+        -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+        local angle = orientation * math.pi / 3 + math.pi / 6
         
         -- Rotate and translate points
         local rotatedPoints = {}
@@ -1088,10 +1779,12 @@ function Combat:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, play
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.print(playerHP .. "/" .. playerMaxHP, 50, gridTop + 142)
     
-    -- Draw moves or crew points based on phase
-    if battle.phase == "movement" then
-        self:drawMovementInfo(battle.playerShip, gridTop, sidebarWidth)
+    -- Draw SP and CP based on phase
+    if battle.phase == "playerMovePlanning" or battle.phase == "maneuverResolution" then
+        -- Show SP for movement planning phases
+        self:drawSailPointsInfo(battle.playerShip, gridTop, sidebarWidth)
     else
+        -- Show CP for action phases
         self:drawCrewPointsInfo(battle.playerShip, gridTop, sidebarWidth)
     end
     
@@ -1106,15 +1799,28 @@ function Combat:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, play
     love.graphics.print("WEEK: " .. gameState.time.currentWeek, 15, gridBottom - 30)
 end
 
--- Draw movement info for a ship
-function Combat:drawMovementInfo(ship, gridTop, sidebarWidth)
+-- Draw Sail Points (SP) info for a ship
+function Combat:drawSailPointsInfo(ship, gridTop, sidebarWidth)
     love.graphics.setColor(1, 1, 1, 0.8)
-    love.graphics.print("MOVEMENT:", 15, gridTop + 165)
-    local baseSpeed = shipUtils.getBaseSpeed(ship.class)
-    local movePercent = ship.movesRemaining / baseSpeed
-    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, movePercent, Constants.COLORS.BUTTON_EVADE, Constants.COLORS.UI_BORDER)
+    love.graphics.print("SAIL POINTS:", 15, gridTop + 165)
+    local spPercent = ship.currentSP / ship.maxSP
+    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, spPercent, Constants.COLORS.BUTTON_EVADE, Constants.COLORS.UI_BORDER)
     love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.print(ship.movesRemaining .. "/" .. baseSpeed, 50, gridTop + 187)
+    love.graphics.print(ship.currentSP .. "/" .. ship.maxSP, 50, gridTop + 187)
+    
+    -- Display any planned move SP cost
+    if self.plannedMoveHex and self.plannedRotation then
+        local cost = self:calculateSPCost(ship, self.plannedMoveHex[1], self.plannedMoveHex[2], self.plannedRotation)
+        if cost > 0 then
+            love.graphics.setColor(1, 0.8, 0.2, 1) -- Gold/yellow for costs
+            love.graphics.print("PLANNED COST: " .. cost .. " SP", 15, gridTop + 210)
+        end
+    end
+end
+
+-- Draw movement info for a ship (legacy function, kept for compatibility)
+function Combat:drawMovementInfo(ship, gridTop, sidebarWidth)
+    self:drawSailPointsInfo(ship, gridTop, sidebarWidth)
 end
 
 -- Draw crew points info for a ship
@@ -1153,10 +1859,22 @@ function Combat:drawEnemySidebar(battle, enemyHP, enemyMaxHP, enemyHP_Percent, l
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.print(enemyHP .. "/" .. enemyMaxHP, screenWidth - sidebarWidth + 50, gridTop + 142)
     
-    -- Draw enemy ship additional info
+    -- Draw enemy ship additional info: SP and Evade Score
+    local yPos = gridTop + 165
+    
+    -- Show SP in movement planning phases
+    if battle.phase == "playerMovePlanning" or battle.phase == "maneuverResolution" then
+        love.graphics.setColor(0.4, 0.6, 0.9, 1) -- Blue for SP
+        love.graphics.print("SAIL POINTS: " .. battle.enemyShip.currentSP .. "/" .. battle.enemyShip.maxSP, 
+                           screenWidth - sidebarWidth + 15, yPos)
+        yPos = yPos + 25
+    end
+    
+    -- Show evade score if it exists
     if battle.enemyShip.evadeScore > 0 then
         love.graphics.setColor(0.9, 0.7, 0.3, 1)
-        love.graphics.print("EVADE SCORE: " .. battle.enemyShip.evadeScore, screenWidth - sidebarWidth + 15, gridTop + 165)
+        love.graphics.print("EVADE SCORE: " .. battle.enemyShip.evadeScore, 
+                           screenWidth - sidebarWidth + 15, yPos)
     end
 end
 
@@ -1288,9 +2006,18 @@ function Combat:drawActionPanel(battle, buttonsY, layout)
     
     -- Different controls based on phase
     if battle.turn == "player" then
-        if battle.phase == "action" then
+        if battle.phase == "playerActionPlanning" or battle.phase == "actionResolution" then
+            -- Action phase - show action buttons
             self:drawActionButtons(battle, buttonsY, screenWidth, layout.sidebarWidth)
+        elseif battle.phase == "playerMovePlanning" then
+            -- Movement planning phase - show maneuver planning controls
+            self:drawManeuverPlanningControls(battle, buttonsY, screenWidth)
+        elseif battle.phase == "maneuverResolution" then
+            -- Maneuver resolution phase - show resolving message
+            love.graphics.setColor(0.7, 0.7, 0.7, 0.7)
+            love.graphics.printf("RESOLVING MANEUVERS...", 0, buttonsY + 15, screenWidth, "center")
         else
+            -- Legacy fallback
             self:drawMovementControls(battle, buttonsY, screenWidth)
         end
     else
@@ -1300,7 +2027,86 @@ function Combat:drawActionPanel(battle, buttonsY, layout)
     end
 end
 
--- Draw the action buttons
+-- Draw the maneuver planning controls
+function Combat:drawManeuverPlanningControls(battle, buttonsY, screenWidth)
+    local buttonSpacing = 20
+    local buttonWidth = 120
+    local buttonHeight = 30
+    
+    -- First draw instructions
+    love.graphics.setColor(1, 1, 1, 0.8)
+    
+    -- Different instructions based on whether destination is selected
+    if self.plannedMoveHex then
+        -- If destination selected, prompt for rotation
+        love.graphics.printf("CHOOSE FINAL ORIENTATION", 0, buttonsY + 5, screenWidth, "center")
+    else
+        -- If no destination, prompt to select one
+        love.graphics.printf("SELECT DESTINATION HEX", 0, buttonsY + 5, screenWidth, "center")
+    end
+    
+    -- Draw rotation controls if we have a planned move
+    if self.plannedMoveHex then
+        -- Rotation controls - Calculate button positions
+        local totalWidth = (2 * buttonWidth) + buttonSpacing
+        local startX = (screenWidth - totalWidth) / 2
+        
+        -- Store button hitboxes for interaction
+        self.rotationButtons = {
+            rotateLeft = {
+                x = startX,
+                y = buttonsY + 25,
+                width = buttonWidth,
+                height = buttonHeight
+            },
+            rotateRight = {
+                x = startX + buttonWidth + buttonSpacing,
+                y = buttonsY + 25,
+                width = buttonWidth,
+                height = buttonHeight
+            }
+        }
+        
+        -- Draw the rotation buttons
+        love.graphics.setColor(0.4, 0.7, 0.9, 0.9) -- Blue for rotation
+        love.graphics.rectangle("fill", self.rotationButtons.rotateLeft.x, self.rotationButtons.rotateLeft.y, 
+                              self.rotationButtons.rotateLeft.width, self.rotationButtons.rotateLeft.height)
+        love.graphics.rectangle("fill", self.rotationButtons.rotateRight.x, self.rotationButtons.rotateRight.y, 
+                              self.rotationButtons.rotateRight.width, self.rotationButtons.rotateRight.height)
+        
+        -- Button text
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("ROTATE LEFT", self.rotationButtons.rotateLeft.x, self.rotationButtons.rotateLeft.y + 8, buttonWidth, "center")
+        love.graphics.printf("ROTATE RIGHT", self.rotationButtons.rotateRight.x, self.rotationButtons.rotateRight.y + 8, buttonWidth, "center")
+        
+        -- If both move and rotation are planned, show confirm button
+        if self.plannedRotation ~= nil then
+            -- Calculate total cost
+            local cost = self:calculateSPCost(battle.playerShip, self.plannedMoveHex[1], self.plannedMoveHex[2], self.plannedRotation)
+            local affordable = cost <= battle.playerShip.currentSP
+            
+            -- Confirm button
+            self.confirmManeuverButton = {
+                x = (screenWidth - buttonWidth) / 2,
+                y = buttonsY + 60,
+                width = buttonWidth,
+                height = buttonHeight
+            }
+            
+            -- Draw confirm button with color based on affordability
+            local buttonColor = affordable and {0.2, 0.8, 0.2, 0.9} or {0.8, 0.2, 0.2, 0.9}
+            love.graphics.setColor(buttonColor)
+            love.graphics.rectangle("fill", self.confirmManeuverButton.x, self.confirmManeuverButton.y,
+                                 self.confirmManeuverButton.width, self.confirmManeuverButton.height)
+            
+            -- Confirm button text
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.printf("CONFIRM (" .. cost .. " SP)", self.confirmManeuverButton.x, 
+                              self.confirmManeuverButton.y + 8, buttonWidth, "center")
+        end
+    end
+end
+
 function Combat:drawActionButtons(battle, buttonsY, screenWidth, sidebarWidth)
     -- Center buttons in the available space
     local buttonSpacing = 20
@@ -1452,10 +2258,18 @@ function Combat:drawInstructionsPanel(battle, buttonsY, layout)
     love.graphics.setColor(1, 1, 1, 0.9)
     local instructions = ""
     if battle.turn == "player" then
-        if battle.phase == "movement" then
+        if battle.phase == "playerMovePlanning" then
+            instructions = "PLANNING PHASE: Select destination hex and rotation (SP: " .. battle.playerShip.currentSP .. "/" .. battle.playerShip.maxSP .. ")"
+        elseif battle.phase == "maneuverResolution" then
+            instructions = "RESOLVING MANEUVERS: Please wait..."
+        elseif battle.phase == "playerActionPlanning" then
+            instructions = "ACTION PHASE: Select action to perform"
+        elseif battle.phase == "movement" then
             instructions = "MOVEMENT PHASE: Click your ship, then click a blue hex to move"
         elseif battle.phase == "action" then
             instructions = "ACTION PHASE: Click a button to perform an action"
+        else
+            instructions = "PHASE: " .. battle.phase
         end
     else
         instructions = "ENEMY TURN: Please wait..."
@@ -1585,7 +2399,26 @@ function Combat:mousemoved(x, y, gameState)
     if not gameState.combat then return end
     
     -- Update hovered hex
+    local oldHoveredHex = self.hoveredHex
     self.hoveredHex = self:getHexFromScreen(x, y)
+    
+    -- Auto-select player ship if not already selected
+    if gameState.combat.phase == "playerMovePlanning" and not self.selectedHex and gameState.combat.playerShip then
+        self.selectedHex = {gameState.combat.playerShip.position[1], gameState.combat.playerShip.position[2]}
+        self:calculateValidMoves(gameState.combat, gameState.combat.playerShip)
+        print("Auto-selected player ship in mousemoved")
+    end
+    
+    -- Debug output when hovering changes
+    if self.hoveredHex and (not oldHoveredHex or 
+                          oldHoveredHex[1] ~= self.hoveredHex[1] or 
+                          oldHoveredHex[2] ~= self.hoveredHex[2]) then
+        if self.hoveredHex then
+            local q, r = self.hoveredHex[1], self.hoveredHex[2]
+            local isValid = self:isValidMove(q, r)
+            print("Now hovering over hex " .. q .. "," .. r .. " - " .. (isValid and "VALID move" or "NOT a valid move"))
+        end
+    end
 end
 
 -- Helper function to check if a point is inside a button
@@ -1604,6 +2437,32 @@ function Combat:drawButtonHitbox(buttonX, buttonY, buttonWidth, buttonHeight)
         love.graphics.setColor(1, 0, 0, 0.8)
         love.graphics.circle("fill", buttonX + buttonWidth/2, buttonY + buttonHeight/2, 2)
     end
+end
+
+-- Check if a point is within the hex grid area
+function Combat:isPointInGridArea(x, y, layout)
+    -- Print debug tracking to help debug the issue
+    print("Checking if point " .. x .. "," .. y .. " is in grid area")
+    
+    -- Use layout constants to determine grid boundaries
+    local gridTop = layout.gridTop or 0
+    local gridBottom = layout.gridBottom or love.graphics.getHeight()
+    local sidebarWidth = layout.sidebarWidth or 100
+    local screenWidth = layout.screenWidth or love.graphics.getWidth()
+    
+    -- Calculate grid area boundaries
+    local gridLeft = sidebarWidth
+    local gridRight = screenWidth - sidebarWidth
+    
+    -- Debug output
+    print("Grid area: " .. gridLeft .. "," .. gridTop .. " to " .. gridRight .. "," .. gridBottom)
+    
+    -- Check if point is within the grid area
+    local inGrid = (x >= gridLeft and x <= gridRight and y >= gridTop and y <= gridBottom)
+    print("Point is " .. (inGrid and "INSIDE" or "OUTSIDE") .. " grid area")
+    
+    -- Always return true for now to debug hex selection
+    return true
 end
 
 -- Handle mouse clicks
@@ -1631,12 +2490,28 @@ function Combat:mousepressed(x, y, button, gameState)
     end
     
     -- If not clicking buttons, check for hex grid interactions
-    -- (but only if click is inside the grid area)
-    if self:isPointInGridArea(x, y, layout) then
-        if battle.turn == "player" and battle.phase == "movement" then
-            self:handleHexClick(x, y, battle, gameState)
+    -- Skip the grid area check to help debug problems
+    --if self:isPointInGridArea(x, y, layout) then
+        print("Checking for hex interactions")
+        if battle.turn == "player" then
+            if battle.phase == "playerMovePlanning" then
+                -- Handle the new maneuver planning phase
+                local handled = self:handleManeuverPlanningClick(x, y, battle)
+                print("Maneuver planning click handled: " .. tostring(handled))
+                
+                -- Debug: if clicks aren't working, force calculate valid moves
+                if not handled then
+                    print("Click not handled - recalculating valid moves")
+                    self.validMoves = {}
+                    self.selectedHex = {battle.playerShip.position[1], battle.playerShip.position[2]}
+                    self:calculateValidMoves(battle, battle.playerShip)
+                end
+            elseif battle.phase == "movement" then
+                -- Legacy movement handling
+                self:handleHexClick(x, y, battle, gameState)
+            end
         end
-    end
+    --end
 end
 
 -- Calculate the Y position for the buttons panel
@@ -2392,6 +3267,10 @@ local Constants = {
         CP_COST_FIRE = 1,                       -- Fire cannons cost 1 CP
         CP_COST_EVADE = 1,                      -- Evade costs 1 CP
         CP_COST_REPAIR = 2,                     -- Repair costs 2 CP
+        
+        -- Sail Point (SP) Costs
+        SP_COST_MOVE_HEX = 1,                   -- Cost to move one hex
+        SP_COST_ROTATE_60 = 1,                  -- Cost to rotate 60 degrees
         
         -- Damage Values
         DAMAGE_CRITICAL = 3,                    -- Critical hit damage
@@ -6539,6 +7418,216 @@ As the game progresses through development, these zones will gain additional pro
 - Tactical combat scenarios
 
 Each zone will develop a distinct personality that affects gameplay and provides unique strategic opportunities for the aspiring pirate captain.
+
+## docs/RevisedCombatSystem.md
+# Pirate's Wager: Blood for Gold - Combat Rules (Revised)
+
+## 1. Overview
+
+This document outlines the rules for the tactical naval combat system in Pirate's Wager: Blood for Gold. Combat takes place on a 10x10 hex grid and emphasizes simultaneous maneuver planning, prediction, resource management (Sail Points & Crew Points), and risk/reward dice mechanics inspired by Forged in the Dark (FitD).
+
+## 2. Key Concepts
+
+*   **Hex Grid:** A 10x10 grid using pointy-top hexes and axial coordinates (q, r).
+*   **Simultaneous Maneuvering:** Player and AI plan their movement and rotation secretly, and these maneuvers are resolved simultaneously.
+*   **Sail Points (SP):** A per-turn resource representing a ship's agility, used to plan movement (moving hexes) and rotation (changing facing). SP varies by ship class.
+*   **Crew Points (CP):** A per-turn resource representing the crew's capacity for action, used to execute combat actions like firing cannons, evading, or repairing. CP varies by ship class and current crew count (for the player).
+*   **Orientation & Firing Arcs:** Ships have a specific facing (orientation). Weapons can only target hexes within defined firing arcs relative to the ship's current orientation.
+*   **FitD Dice Mechanics:** Actions are resolved by rolling a pool of d6s. The highest die determines the outcome: Critical (multiple 6s), Success (highest is 6), Partial Success (highest is 4-5), or Failure (highest is 1-3).
+
+## 3. Battlefield & Ships
+
+*   **Grid:** 10x10 hexes.
+*   **Ship Representation:**
+    *   Ships occupy 1-4 hexes based on class.
+    *   Each ship has a central anchor hex (`position {q, r}`) and an `orientation` (0-5, representing 60° increments, 0=North).
+    *   Ship shapes rotate based on orientation.
+*   **Ship Classes & Base Stats:**
+
+    | Class      | Hex Size/Shape | Max HP | Base Max SP | Base Max CP | Base Speed (Moves/Turn) | Base Firepower (Dice) | Firing Arcs          |
+    | :--------- | :------------- | :----- | :---------- | :---------- | :---------------------- | :-------------------- | :------------------- |
+    | Sloop      | 1 hex          | 10     | 5           | 2 (*Note 1*) | 3                       | 1                     | Forward Only         |
+    | Brigantine | 2 hexes (line) | 20     | 4           | 4 (*Note 1*) | 2                       | 3                     | Broadsides (Sides)   |
+    | Galleon    | 4 hexes (kite) | 40     | 3           | 6 (*Note 1*) | 1                       | 6                     | Broadsides (Sides)   |
+
+    *Note 1: Player ship's Max CP is based on `#gameState.crew.members`, capped by ship capacity. Enemy Max CP uses these base values.*
+
+## 4. Combat Turn Structure
+
+Each combat turn follows this sequence:
+
+1.  **Start of Turn:**
+    *   Replenish `currentSP` to `maxSP` for both ships.
+    *   Replenish `currentCP` to `maxCP` for both ships.
+    *   Clear any temporary turn-based effects or states (e.g., evade scores from previous turns if applicable, planned moves/rotations).
+    *   Advance turn counter (`gameState.combat.turnCount`).
+
+2.  **Enemy Planning Phase (Internal):**
+    *   AI determines its intended maneuver (`plannedMove` hex and `plannedRotation` orientation).
+    *   AI calculates SP cost and ensures the plan is affordable. Revises if necessary.
+    *   AI determines its intended action(s) for the Action Phase (based on anticipated post-maneuver state).
+    *   *Plans are stored internally, not revealed to the player.*
+
+3.  **Player Planning Phase (Movement & Rotation):** (`gameState.combat.phase = "playerMovePlanning"`)
+    *   Player sees current board state, their available SP.
+    *   Player selects a target **orientation** using UI controls.
+    *   Player selects a target **destination hex** from valid moves.
+    *   UI displays SP cost for the planned move path + planned rotation change.
+    *   Player cannot confirm a plan costing more than `currentSP`.
+    *   Player **commits** the maneuver plan (stores destination in `playerShip.plannedMove`, final orientation in `playerShip.plannedRotation`).
+
+4.  **Resolution Phase (Maneuver):** (`gameState.combat.phase = "maneuverResolution"`)
+    *   **Rotation Update:** Internal `ship.orientation` state is instantly updated for *both* ships based on their `plannedRotation`.
+    *   **Collision Check:** Check if `plannedMove` destinations conflict. Adjust `plannedMove` destinations for involved ships according to collision rules (e.g., stop 1 hex short).
+    *   **Movement Execution & SP Deduction:**
+        *   Animate both ships rotating towards their new orientation *while* moving towards their (potentially adjusted) destination hexes.
+        *   Calculate the *actual* SP cost incurred for the maneuver performed (actual hexes moved + rotation steps).
+        *   Deduct SP: `ship.currentSP -= actualCost`.
+        *   Update internal `ship.position` state upon animation completion.
+    *   Clear `plannedMove` and `plannedRotation` for both ships.
+
+5.  **Player Planning Phase (Action):** (`gameState.combat.phase = "playerActionPlanning"`)
+    *   Player sees the board state *after* maneuvers have resolved.
+    *   Player selects actions (Fire, Evade, Repair, etc.) using available **CP**.
+    *   Targeting for actions like "Fire Cannons" is constrained by the ship's current orientation and **firing arcs**.
+    *   Selecting an action leads to the Confirmation Window (showing dice/modifiers/cost).
+    *   Player Confirms or Cancels the action.
+
+6.  **Resolution Phase (Action):** (`gameState.combat.phase = "actionResolution" or "displayingResult"`)
+    *   If player confirmed action: Deduct CP, roll dice, determine outcome, apply effects (damage, repair, evade score).
+    *   Display action results dynamically (dice roll visualization, outcome text, effect summary).
+    *   AI executes its planned action(s) sequentially, using its remaining CP. AI targeting also respects firing arcs. Results are displayed dynamically.
+
+7.  **End of Turn:**
+    *   Perform any end-of-turn cleanup (e.g., expire temporary effects).
+    *   Check win/loss conditions.
+    *   Loop back to Start of Turn for the next turn number.
+
+## 5. Core Mechanics Deep Dive
+
+### 5.1. Sail Points (SP)
+
+*   **Purpose:** Governs maneuverability (movement and rotation).
+*   **Replenishment:** Fully restored to `maxSP` at the start of each turn.
+*   **Costs (Planned - Subject to Tuning):**
+    *   Move 1 Hex: 1 SP
+    *   Rotate 60° (1 facing change): 1 SP
+*   **Planning:** SP cost is calculated based on the planned path distance + the number of 60° steps needed to reach the planned orientation. The maneuver cannot be committed if `Total Cost > currentSP`.
+*   **Deduction:** SP is deducted during the Maneuver Resolution phase based on the *actual* movement and rotation performed (after collision checks).
+
+### 5.2. Crew Points (CP)
+
+*   **Purpose:** Governs the crew's ability to perform actions (combat, repair, etc.).
+*   **Replenishment:** Fully restored to `maxCP` at the start of each turn.
+*   **Source:**
+    *   Player: Number of crew members currently on ship (`#gameState.crew.members`), capped by ship's `crewCapacity`.
+    *   Enemy: Based on ship class (`shipUtils.getBaseCP`).
+*   **Costs:** Defined per action (see Actions List).
+*   **Usage:** Spent during the Action Planning/Resolution phases to execute actions. Multiple actions can be performed if enough CP is available.
+
+### 5.3. Movement & Rotation
+
+*   **Planning:** Player/AI select both a target hex and a target orientation during their respective planning phases, constrained by SP.
+*   **Resolution:** Planned rotations and moves resolve simultaneously during the Maneuver Resolution phase. Ship orientations update instantly internally, while visual rotation tweens alongside movement animation. SP is deducted based on the resolved maneuver.
+
+### 5.4. Firing Arcs
+
+*   **Definition:** Each ship class has defined arcs relative to its forward direction (Orientation 0).
+    *   **Forward:** Directly ahead.
+    *   **Sides (Broadsides):** To the left and right flanks.
+    *   **Rear:** Directly behind.
+*   **Constraint:** The "Fire Cannons" action can only target hexes that fall within an active firing arc based on the ship's *current* orientation (after maneuvering).
+*   **Implementation:** `Combat:isInFiringArc(ship, targetQ, targetR)` checks validity. `Combat:getFiringArcHexes(ship)` calculates all valid target hexes within range.
+
+### 5.5. Dice Rolls & Outcomes (FitD)
+
+*   **Rolling:** Actions trigger a roll of 1-5 d6s. The pool size = Base Dice (from ship/action) + Modifiers (from crew, situation, evade scores). Max 5 dice.
+*   **Zero Dice:** If modifiers reduce the pool to 0 or less, roll 2d6 and take the *lowest* result.
+*   **Interpretation:** Determined by the *single highest die* rolled:
+    *   **Critical Success:** Multiple 6s rolled. (Outcome Level 3)
+    *   **Success:** Highest die is a 6. (Outcome Level 2)
+    *   **Partial Success:** Highest die is 4 or 5. (Outcome Level 1)
+    *   **Failure:** Highest die is 1, 2, or 3. (Outcome Level 0)
+*   **Effects:** Actions have different effects based on the Outcome Level achieved (see Actions List).
+
+### 5.6. Collisions
+
+*   **Detection:** Checked during Maneuver Resolution based on `plannedMove` destinations.
+*   **Rule (Basic):** If two ships plan to move to the same hex, both stop 1 hex short along their planned path. Their orientation changes still resolve as planned. SP cost is adjusted based on actual distance moved. *(More complex rules can be added later)*.
+
+## 6. Actions List
+
+Actions are performed during the Action Phase using CP. Player actions require confirmation via the Confirmation Window.
+
+*   **Fire Cannons**
+    *   **CP Cost:** `Constants.COMBAT.CP_COST_FIRE` (1 CP)
+    *   **Targeting:** Requires selecting an enemy ship hex within a valid firing arc and range.
+    *   **Dice Pool:** `shipUtils.getBaseFirepowerDice(ship.class)` + Modifiers.
+    *   **Modifiers:**
+        *   `+1` Point Blank (adjacent hex)
+        *   `-X` Target Evading (where X is target's `evadeScore`)
+        *   `+Y` Gunner Skill (Player only: `member.skill * Constants.GAME.GUNNER_SKILL_MULTIPLIER`)
+        *   +/- Other situational/temporary modifiers.
+    *   **Effects:**
+        *   Critical (Lvl 3): `Constants.COMBAT.DAMAGE_CRITICAL` (3 HP) damage.
+        *   Success (Lvl 2): `Constants.COMBAT.DAMAGE_SUCCESS` (2 HP) damage.
+        *   Partial (Lvl 1): `Constants.COMBAT.DAMAGE_PARTIAL` (1 HP) damage.
+        *   Failure (Lvl 0): No damage.
+    *   **Note:** Target's `evadeScore` is reset to 0 *after* being applied to the incoming attack roll.
+
+*   **Evade**
+    *   **CP Cost:** `Constants.COMBAT.CP_COST_EVADE` (1 CP)
+    *   **Targeting:** Self.
+    *   **Dice Pool:** `shipUtils.getBaseSpeed(ship.class)` + Modifiers.
+    *   **Modifiers:**
+        *   +/- Other situational/temporary modifiers.
+    *   **Effects:** Sets the ship's `evadeScore` for the *next* turn (or until used).
+        *   Critical (Lvl 3): `evadeScore = 3`
+        *   Success (Lvl 2): `evadeScore = 2`
+        *   Partial (Lvl 1): `evadeScore = 1`
+        *   Failure (Lvl 0): `evadeScore = 0`
+    *   **Note:** `evadeScore` reduces the number of dice rolled by enemies attacking this ship.
+
+*   **Repair**
+    *   **CP Cost:** `Constants.COMBAT.CP_COST_REPAIR` (2 CP)
+    *   **Targeting:** Self.
+    *   **Dice Pool:** 1 (Base) + Modifiers.
+    *   **Modifiers:**
+        *   `+Y` Surgeon Skill (Player only: `member.skill`)
+        *   +/- Other situational/temporary modifiers.
+    *   **Effects:** Restores ship durability (HP).
+        *   Critical (Lvl 3): `+Constants.COMBAT.REPAIR_CRITICAL` (15 HP) restored.
+        *   Success (Lvl 2): `+Constants.COMBAT.REPAIR_SUCCESS` (10 HP) restored.
+        *   Partial (Lvl 1): `+Constants.COMBAT.REPAIR_PARTIAL` (5 HP) restored.
+        *   Failure (Lvl 0): No HP restored.
+    *   **Note:** Cannot repair above the ship's maximum durability.
+
+*   **End Turn** (Player Only Action Menu Option)
+    *   **CP Cost:** 0 CP
+    *   **Effect:** Immediately ends the player's action planning phase and proceeds to the enemy's action resolution (if applicable) or the start of the next turn.
+
+## 7. AI Behavior
+
+*   Enemy AI plans its maneuver (move + rotation) within its SP budget during the Enemy Planning Phase.
+*   Enemy AI plans its action(s) based on its anticipated post-maneuver state (e.g., choosing Fire Cannons only if the player is expected to be in arc).
+*   During the Action Resolution Phase, the AI executes its planned actions sequentially using its available CP, respecting firing arcs based on its *actual* post-maneuver position/orientation.
+*   Current AI prioritizes: Repair (if low HP), Evade (if moderate HP), Fire Cannons (if high HP and target in arc), Move closer/into arc.
+
+## 8. Winning & Losing
+
+*   **Victory:** Enemy ship durability reaches 0 HP. Player may receive loot. Combat ends, return to Exploration mode.
+*   **Defeat:** Player ship durability reaches 0 HP. Results in Game Over (current implementation).
+*   **Retreat:** (Future Feature) Player or enemy moves off the battle grid. May involve a dice roll to determine success.
+
+## 9. UI Summary
+
+*   **Minimal HUD:** Displays Turn/Phase, Player HP/CP/SP, Enemy HP.
+*   **Ship Info Window:** On-demand details via hover.
+*   **Action Menu:** Contextual list of actions available during player action planning.
+*   **Confirmation Window:** Displays dice pool breakdown, modifiers, and costs before committing an action.
+*   **Result Overlay:** Temporarily displays dice results and effects after an action resolves.
+*   **Maneuver Planning:** Visual feedback for planned path, orientation, and SP cost.
+*   **Firing Arc Highlight:** Visual indication of valid target hexes when planning "Fire Cannons".
 
 ## docs/TimeSystem.md
 # Time System Documentation
@@ -7362,7 +8451,7 @@ Pokemon, Fire Emblem, and Golden Sun for inspiration on how to work around low-r
 
 ## ./codebase_dump.md
 # PortRoyal Codebase Dump
-Generated: Sat Mar 29 16:41:44 CDT 2025
+Generated: Sun Mar 30 22:14:28 CDT 2025
 
 # Source Code
 
@@ -7397,6 +8486,13 @@ local Combat = {
     hoveredHex = nil,   -- Currently hovered hex coordinates {q, r}
     selectedHex = nil,  -- Currently selected hex coordinates
     validMoves = {},    -- Valid move targets for selected ship
+    
+    -- SP planning phase variables
+    plannedRotation = nil,  -- Temporary storage for rotation during planning
+    hoveredMoveHex = nil,   -- Hex being hovered during movement planning
+    plannedMoveHex = nil,   -- Hex selected as destination during planning
+    rotationButtons = nil,  -- UI elements for rotation controls
+    confirmManeuverButton = nil, -- UI element for confirm button
     
     -- Active battle data (will be stored in gameState.combat)
     -- Included here as reference/documentation
@@ -7514,7 +8610,12 @@ function Combat:initBattle(gameState, enemyShipClass)
             hasActed = false,  -- Whether ship has performed an action this turn
             modifiers = {},    -- Active modifiers
             crewPoints = gameState.crew.members and #gameState.crew.members or 1, -- Available crew points for actions
-            maxCrewPoints = gameState.crew.members and #gameState.crew.members or 1  -- Maximum crew points per turn
+            maxCrewPoints = gameState.crew.members and #gameState.crew.members or 1,  -- Maximum crew points per turn
+            -- New SP and maneuver planning fields
+            currentSP = self:getMaxSP(playerShipClass),
+            maxSP = self:getMaxSP(playerShipClass),
+            plannedMove = nil, -- Will store destination hex {q, r}
+            plannedRotation = nil -- Will store target orientation (0-5)
         },
         enemyShip = {
             class = enemyShipClass or "sloop", -- Default to sloop if not specified
@@ -7527,10 +8628,15 @@ function Combat:initBattle(gameState, enemyShipClass)
             hasActed = false,  -- Whether ship has performed an action this turn
             modifiers = {},    -- Active modifiers
             crewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop"), -- Based on ship class
-            maxCrewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop")
+            maxCrewPoints = shipUtils.getBaseCP(enemyShipClass or "sloop"),
+            -- New SP and maneuver planning fields
+            currentSP = self:getMaxSP(enemyShipClass or "sloop"),
+            maxSP = self:getMaxSP(enemyShipClass or "sloop"),
+            plannedMove = nil, -- Will store destination hex {q, r}
+            plannedRotation = nil -- Will store target orientation (0-5)
         },
         turn = "player",
-        phase = "movement",
+        phase = "playerMovePlanning", -- Updated to new phase system
         actionResult = nil,    -- Stores result of the last action
         turnCount = 1          -- Track number of turns
     }
@@ -7541,6 +8647,16 @@ function Combat:initBattle(gameState, enemyShipClass)
     
     -- Store battle in gameState
     gameState.combat = battle
+    
+    -- Process initial enemy planning for first turn
+    self:processEnemyPlanning(battle)
+    
+    -- Always set up initial valid moves for player (regardless of phase)
+    print("Calculating initial valid moves for player ship")
+    self.validMoves = {}
+    self.selectedHex = {battle.playerShip.position[1], battle.playerShip.position[2]}
+    self:calculateValidMoves(battle, battle.playerShip)
+    print("Initial calculation found " .. #self.validMoves .. " valid moves")
     
     print("New naval battle initialized: " .. playerShipClass .. " vs " .. (enemyShipClass or "sloop"))
     return battle
@@ -7643,6 +8759,7 @@ function Combat:getHexFromScreen(x, y)
             -- Check if this is in the hex (hexagons have radius = self.HEX_RADIUS)
             if dist <= self.HEX_RADIUS then
                 -- Inside this hex - return immediately
+                print("Found exact hex at " .. q .. "," .. r .. " (distance: " .. dist .. ")")
                 return {q, r}
             end
             
@@ -7654,12 +8771,14 @@ function Combat:getHexFromScreen(x, y)
         end
     end
     
-    -- If mouse is close enough to the grid, return the closest hex
-    if minDistance < self.HEX_RADIUS * 2 then
+    -- For debugging: Always return the closest hex, regardless of distance
+    if closestHex then
+        print("Returning closest hex " .. closestHex[1] .. "," .. closestHex[2] .. " (distance: " .. minDistance .. ")")
         return closestHex
     end
     
     -- Mouse is too far from any hex
+    print("No hex found near " .. x .. "," .. y)
     return nil
 end
 
@@ -7688,7 +8807,202 @@ function math.round(x)
     return x >= 0 and math.floor(x + 0.5) or math.ceil(x - 0.5)
 end
 
+-- Mouse click handler for the playerMovePlanning phase
+function Combat:handleManeuverPlanningClick(x, y, battle)
+    -- Debug info
+    print("Handling maneuver planning click at " .. x .. "," .. y)
+    
+    -- If rotation buttons are visible and clicked
+    if self.plannedMoveHex and self.rotationButtons then
+        -- Check if Rotate Left button is clicked
+        if self:isPointInRect(x, y, self.rotationButtons.rotateLeft) then
+            print("Rotate left button clicked")
+            -- Rotate left (counter-clockwise)
+            if self.plannedRotation == nil then
+                -- If no rotation is set yet, start from the current ship orientation
+                self.plannedRotation = (battle.playerShip.orientation - 1) % 6
+            else
+                -- Otherwise, just rotate from the current planned orientation
+                self.plannedRotation = (self.plannedRotation - 1) % 6
+            end
+            print("New rotation: " .. self.plannedRotation)
+            return true
+        end
+        
+        -- Check if Rotate Right button is clicked
+        if self:isPointInRect(x, y, self.rotationButtons.rotateRight) then
+            print("Rotate right button clicked")
+            -- Rotate right (clockwise)
+            if self.plannedRotation == nil then
+                -- If no rotation is set yet, start from the current ship orientation
+                self.plannedRotation = (battle.playerShip.orientation + 1) % 6
+            else
+                -- Otherwise, just rotate from the current planned orientation
+                self.plannedRotation = (self.plannedRotation + 1) % 6
+            end
+            print("New rotation: " .. self.plannedRotation)
+            return true
+        end
+    end
+    
+    -- Check if Confirm button is clicked
+    if self.plannedMoveHex and self.plannedRotation and self.confirmManeuverButton then
+        if self:isPointInRect(x, y, self.confirmManeuverButton) then
+            print("Confirm button clicked")
+            -- Calculate SP cost
+            local cost = self:calculateSPCost(battle.playerShip, self.plannedMoveHex[1], self.plannedMoveHex[2], self.plannedRotation)
+            
+            -- Check if player has enough SP
+            if cost <= battle.playerShip.currentSP then
+                print("Confirming maneuver - cost: " .. cost .. " SP")
+                -- Store planned move and rotation in ship data
+                battle.playerShip.plannedMove = {self.plannedMoveHex[1], self.plannedMoveHex[2]}
+                battle.playerShip.plannedRotation = self.plannedRotation
+                
+                -- Advance to the next phase (maneuver resolution)
+                self:advanceToNextPhase(battle)
+                return true
+            else
+                -- Not enough SP - provide feedback
+                print("Not enough Sail Points for this maneuver!")
+                return true
+            end
+        end
+    end
+    
+    -- Check if a hex on the grid was clicked
+    print("Attempting to get hex from screen coordinates: " .. x .. "," .. y)
+    
+    -- First check if player ship is already selected
+    if not self.selectedHex then
+        -- Auto-select player ship to show valid moves
+        print("Auto-selecting player ship")
+        self.selectedHex = {battle.playerShip.position[1], battle.playerShip.position[2]}
+        self:calculateValidMoves(battle, battle.playerShip)
+    end
+    
+    -- Get clicked hex
+    local clickedHex = self:getHexFromScreen(x, y)
+    if clickedHex then
+        local q, r = clickedHex[1], clickedHex[2]
+        print("Clicked hex: " .. q .. "," .. r)
+        
+        -- Check if clicked hex is a valid move
+        if self:isValidMove(q, r) then
+            print("Valid move selected at " .. q .. "," .. r)
+            -- Store as planned move destination
+            self.plannedMoveHex = {q, r}
+            
+            -- If no rotation planned yet, initialize it to current orientation
+            if not self.plannedRotation then
+                self.plannedRotation = battle.playerShip.orientation
+                print("Set initial rotation to current orientation: " .. self.plannedRotation)
+            end
+            
+            return true
+        elseif battle.grid[q] and battle.grid[q][r] and battle.grid[q][r].isPlayerShip then
+            print("Player ship selected at " .. q .. "," .. r)
+            -- If player clicked their ship, select it to show valid moves
+            self.selectedHex = {q, r}
+            
+            -- Calculate and store valid moves for selected ship
+            self:calculateValidMoves(battle, battle.playerShip)
+            
+            return true
+        else
+            print("Hex is not a valid move or player ship")
+            
+            -- Try recalculating valid moves in case they weren't set properly
+            if #self.validMoves == 0 and self.selectedHex then
+                print("Recalculating valid moves")
+                self:calculateValidMoves(battle, battle.playerShip)
+            end
+        end
+    else
+        print("No hex found at click position")
+    end
+    
+    return false
+end
+
+-- Helper function to check if a point is inside a rectangle
+function Combat:isPointInRect(x, y, rect)
+    return x >= rect.x and x <= rect.x + rect.width and
+           y >= rect.y and y <= rect.y + rect.height
+end
+
 -- Get neighbors of a hex
+-- Calculate valid moves for SP-based movement
+function Combat:calculateValidMoves(battle, ship)
+    self.validMoves = {} -- Clear previous valid moves
+    
+    -- Get the ship's current position and SP
+    local shipQ, shipR = ship.position[1], ship.position[2]
+    local availableSP = ship.currentSP
+    
+    print("Calculating valid moves for ship at " .. shipQ .. "," .. shipR .. " with " .. availableSP .. " SP")
+    
+    -- Each SP allows moving 1 hex, so the maximum distance we can move is equal to availableSP
+    local maxDistance = availableSP
+    
+    -- Initialize an empty valid moves list
+    self.validMoves = {}
+    
+    -- Loop through all grid cells within maxDistance
+    for q = math.max(0, shipQ - maxDistance), math.min(self.GRID_SIZE - 1, shipQ + maxDistance) do
+        for r = math.max(0, shipR - maxDistance), math.min(self.GRID_SIZE - 1, shipR + maxDistance) do
+            -- Skip the ship's current position
+            if q ~= shipQ or r ~= shipR then
+                -- Calculate distance between ship and this hex
+                local distance = self:hexDistance(shipQ, shipR, q, r)
+                
+                -- Check if within movement range
+                if distance <= maxDistance then
+                    -- Check if the hex is empty (no ships)
+                    if battle.grid[q] and battle.grid[q][r] and 
+                       not (battle.grid[q][r].isPlayerShip or battle.grid[q][r].isEnemyShip) then
+                        -- This is a valid move destination, add it to valid moves
+                        table.insert(self.validMoves, {q, r})
+                        print("Added valid move: " .. q .. "," .. r .. " (distance: " .. distance .. ")")
+                    else
+                        print("Hex " .. q .. "," .. r .. " occupied or out of bounds")
+                    end
+                else
+                    print("Hex " .. q .. "," .. r .. " too far (distance: " .. distance .. ")")
+                end
+            end
+        end
+    end
+    
+    -- Force some valid moves for debugging!
+    if #self.validMoves == 0 then
+        print("NO VALID MOVES FOUND - FORCING SOME FOR DEBUGGING")
+        
+        -- Add some moves adjacent to the ship
+        local directions = {
+            {1, 0}, {1, -1}, {0, -1}, 
+            {-1, 0}, {-1, 1}, {0, 1}
+        }
+        
+        for _, dir in ipairs(directions) do
+            local newQ = shipQ + dir[1]
+            local newR = shipR + dir[2]
+            
+            -- Check if within grid bounds
+            if newQ >= 0 and newQ < self.GRID_SIZE and newR >= 0 and newR < self.GRID_SIZE then
+                -- Check if empty
+                if not (battle.grid[newQ][newR].isPlayerShip or battle.grid[newQ][newR].isEnemyShip) then
+                    table.insert(self.validMoves, {newQ, newR})
+                    print("FORCED valid move: " .. newQ .. "," .. newR)
+                end
+            end
+        end
+    end
+    
+    -- Print debug summary
+    print("Calculated " .. #self.validMoves .. " valid moves for ship with " .. availableSP .. " SP")
+end
+
 function Combat:getHexNeighbors(q, r)
     local neighbors = {}
     
@@ -7808,7 +9122,454 @@ function Combat:offsetToCube(q, r)
     return x, y, z
 end
 
+-- Calculate direction vector from one hex to another
+function Combat:calculateDirectionVector(fromQ, fromR, toQ, toR)
+    -- Normalize the direction
+    local dirQ = toQ - fromQ
+    local dirR = toR - fromR
+    
+    -- Simple normalization
+    local length = math.sqrt(dirQ*dirQ + dirR*dirR)
+    if length > 0 then
+        dirQ = dirQ / length
+        dirR = dirR / length
+    end
+    
+    return {q = dirQ, r = dirR}
+end
+
+-- Get maximum Sail Points for a ship class
+function Combat:getMaxSP(shipClass)
+    -- Max SP values based on ship class as defined in RevisedCombatSystem.md
+    if shipClass == "sloop" then
+        return 5
+    elseif shipClass == "brigantine" then
+        return 4
+    elseif shipClass == "galleon" then
+        return 3
+    else
+        return 5 -- Default to sloop if unknown class
+    end
+end
+
+-- Calculate the SP cost of a planned maneuver
+function Combat:calculateSPCost(ship, targetQ, targetR, targetOrientation)
+    local spCost = 0
+    
+    -- Movement cost: SP_COST_MOVE_HEX per hex moved
+    if targetQ and targetR then
+        local distance = self:hexDistance(ship.position[1], ship.position[2], targetQ, targetR)
+        spCost = spCost + (distance * Constants.COMBAT.SP_COST_MOVE_HEX)
+    end
+    
+    -- Rotation cost: SP_COST_ROTATE_60 per 60° orientation change
+    if targetOrientation ~= nil then
+        -- Calculate the shortest rotation distance between current and target orientation
+        local currentOrientation = ship.orientation
+        local rotationDistance = math.min(
+            math.abs(targetOrientation - currentOrientation),
+            6 - math.abs(targetOrientation - currentOrientation)
+        )
+        spCost = spCost + (rotationDistance * Constants.COMBAT.SP_COST_ROTATE_60)
+    end
+    
+    return spCost
+end
+
 -- Convert hex coordinates to screen coordinates
+function Combat:hexToScreen(q, r)
+    -- For pointy-top hexagons
+    local hexWidth = self.HEX_RADIUS * math.sqrt(3)
+    local hexHeight = self.HEX_RADIUS * 2
+    
+    -- Calculate the total grid size in pixels
+    -- For a pointy-top hex grid with brick layout pattern
+    local gridWidthInHexes = self.GRID_SIZE
+    local gridHeightInHexes = self.GRID_SIZE
+    
+    -- Total width = width of a column of hexes * number of columns
+    local totalGridWidth = hexWidth * gridWidthInHexes
+    -- Total height = height of a hex * number of rows, accounting for overlap
+    local totalGridHeight = hexHeight * 0.75 * gridHeightInHexes + hexHeight * 0.25
+    
+    -- Make sure we have proper grid center coordinates
+    -- This should be exactly the center of the available play area
+    local centerX = self.gridOffsetX
+    local centerY = self.gridOffsetY
+    
+    -- Calculate grid origin (top-left corner of the hex grid itself)
+    -- This centers the actual hex grid within whatever panel is showing it
+    local gridOriginX = centerX - (totalGridWidth / 2)
+    local gridOriginY = centerY - (totalGridHeight / 2)
+    
+    -- Calculate the position for this specific hex
+    local hexX = gridOriginX + (q * hexWidth)
+    local hexY = gridOriginY + (r * hexHeight * 0.75)
+    
+    -- Apply horizontal offset for odd rows (brick pattern layout)
+    if r % 2 == 1 then
+        hexX = hexX + (hexWidth / 2)
+    end
+    
+    return hexX, hexY
+end
+
+function Combat:startNewTurn(battle)
+    -- Increment turn counter
+    battle.turnCount = battle.turnCount + 1
+    
+    -- Replenish Sail Points and Crew Points for both ships
+    self:replenishResources(battle.playerShip)
+    self:replenishResources(battle.enemyShip)
+    
+    -- Clear planned moves and rotations
+    battle.playerShip.plannedMove = nil
+    battle.playerShip.plannedRotation = nil
+    battle.enemyShip.plannedMove = nil
+    battle.enemyShip.plannedRotation = nil
+    
+    -- Reset temporary planning variables in the Combat module
+    self.plannedRotation = nil
+    self.hoveredMoveHex = nil
+    self.plannedMoveHex = nil
+    self.rotationButtons = nil
+    self.confirmManeuverButton = nil
+    
+    -- Clear any temporary turn-based effects
+    battle.playerShip.evadeScore = 0
+    battle.enemyShip.evadeScore = 0
+    
+    -- Set the initial phase for the new turn - enemy planning happens internally
+    battle.phase = "playerMovePlanning"
+    
+    print("Starting new turn " .. battle.turnCount)
+end
+
+-- Replenish a ship's resources (SP and CP) at the start of a turn
+function Combat:replenishResources(ship)
+    -- Replenish Sail Points to maximum
+    ship.currentSP = ship.maxSP
+    
+    -- Replenish Crew Points to maximum
+    ship.crewPoints = ship.maxCrewPoints
+    
+    -- Reset action flags
+    ship.hasActed = false
+end
+
+-- Process enemy ship's planning phase (internal AI logic)
+function Combat:processEnemyPlanning(battle)
+    -- Get enemy and player ships
+    local enemyShip = battle.enemyShip
+    local playerShip = battle.playerShip
+    
+    -- Get enemy position and orientation
+    local enemyQ, enemyR = enemyShip.position[1], enemyShip.position[2]
+    local enemyOrientation = enemyShip.orientation
+    
+    -- Calculate health percentage for strategy selection
+    local maxHealth = shipUtils.getMaxHP(enemyShip.class)
+    local healthPercent = enemyShip.durability / maxHealth
+    
+    -- Choose strategy based on health
+    local strategy
+    if healthPercent < 0.3 then
+        strategy = "defensive" -- Run away when critically damaged
+    elseif healthPercent < 0.7 then
+        strategy = "cautious"  -- Maintain medium distance when moderately damaged
+    else
+        strategy = "aggressive" -- Get close when healthy
+    end
+    
+    -- Plan target destination and orientation
+    local targetQ, targetR, targetOrientation = self:planEnemyManeuver(battle, strategy, enemyShip)
+    
+    -- Calculate SP cost for the planned maneuver
+    local moveCost = self:calculateSPCost(enemyShip, targetQ, targetR, nil)
+    local rotateCost = self:calculateSPCost(enemyShip, nil, nil, targetOrientation)
+    local totalCost = moveCost + rotateCost
+    
+    -- Check if the maneuver is affordable
+    if totalCost <= enemyShip.currentSP then
+        -- Store the planned move and rotation
+        enemyShip.plannedMove = {targetQ, targetR}
+        enemyShip.plannedRotation = targetOrientation
+        print("Enemy planning: Move to " .. targetQ .. "," .. targetR .. ", rotate to " .. targetOrientation .. " (SP cost: " .. totalCost .. ")")
+    else
+        -- If unaffordable, try simpler fallback options
+        print("Enemy's preferred maneuver costs " .. totalCost .. " SP, which exceeds available " .. enemyShip.currentSP .. " SP. Using fallback plan.")
+        
+        -- Try just rotation, no movement
+        if rotateCost <= enemyShip.currentSP then
+            enemyShip.plannedMove = {enemyQ, enemyR} -- Stay in place
+            enemyShip.plannedRotation = targetOrientation
+            print("Enemy fallback plan: Stay in place, rotate to " .. targetOrientation .. " (SP cost: " .. rotateCost .. ")")
+        
+        -- Try just movement, no rotation
+        elseif moveCost <= enemyShip.currentSP then
+            enemyShip.plannedMove = {targetQ, targetR}
+            enemyShip.plannedRotation = enemyOrientation -- Keep current orientation
+            print("Enemy fallback plan: Move to " .. targetQ .. "," .. targetR .. ", keep orientation " .. enemyOrientation .. " (SP cost: " .. moveCost .. ")")
+        
+        -- If still unaffordable, do nothing
+        else
+            enemyShip.plannedMove = {enemyQ, enemyR} -- Stay in place
+            enemyShip.plannedRotation = enemyOrientation -- Keep current orientation
+            print("Enemy fallback plan: Do nothing (insufficient SP for any meaningful maneuver)")
+        end
+    end
+end
+
+-- Plan the enemy's maneuver based on the selected strategy
+function Combat:planEnemyManeuver(battle, strategy, enemyShip)
+    local playerShip = battle.playerShip
+    local enemyQ, enemyR = enemyShip.position[1], enemyShip.position[2]
+    local playerQ, playerR = playerShip.position[1], playerShip.position[2]
+    
+    -- Calculate direction to player
+    local directionToPlayer = self:calculateDirectionVector(enemyQ, enemyR, playerQ, playerR)
+    
+    -- Calculate distance to player
+    local distanceToPlayer = self:hexDistance(enemyQ, enemyR, playerQ, playerR)
+    
+    -- Plan target position
+    local targetQ, targetR
+    
+    if strategy == "defensive" then
+        -- Move away from player
+        targetQ = enemyQ - directionToPlayer.q
+        targetR = enemyR - directionToPlayer.r
+        
+        -- Clamp to grid bounds
+        targetQ = math.max(0, math.min(self.GRID_SIZE - 1, targetQ))
+        targetR = math.max(0, math.min(self.GRID_SIZE - 1, targetR))
+        
+    elseif strategy == "cautious" then
+        -- Maintain medium distance (3 hexes) from player
+        if distanceToPlayer < 3 then
+            -- Too close, move away a bit
+            targetQ = enemyQ - directionToPlayer.q
+            targetR = enemyR - directionToPlayer.r
+        elseif distanceToPlayer > 3 then
+            -- Too far, move closer a bit
+            targetQ = enemyQ + directionToPlayer.q
+            targetR = enemyR + directionToPlayer.r
+        else
+            -- Just right, strafe around player
+            -- Simple strafing: move perpendicular to player direction
+            targetQ = enemyQ + directionToPlayer.r
+            targetR = enemyR - directionToPlayer.q
+        end
+        
+        -- Clamp to grid bounds
+        targetQ = math.max(0, math.min(self.GRID_SIZE - 1, targetQ))
+        targetR = math.max(0, math.min(self.GRID_SIZE - 1, targetR))
+        
+    else -- "aggressive"
+        -- Move towards player, but stop 1 hex away (for firing)
+        if distanceToPlayer > 2 then
+            targetQ = enemyQ + directionToPlayer.q
+            targetR = enemyR + directionToPlayer.r
+        else
+            -- Already close enough, stay in place
+            targetQ = enemyQ
+            targetR = enemyR
+        end
+    end
+    
+    -- Round to nearest integer for hex coordinates
+    targetQ = math.floor(targetQ + 0.5)
+    targetR = math.floor(targetR + 0.5)
+    
+    -- Plan target orientation - face towards player
+    local targetOrientation = self:calculateOrientationTowards(enemyQ, enemyR, playerQ, playerR)
+    
+    return targetQ, targetR, targetOrientation
+end
+
+-- Calculate the orientation needed to face from one hex towards another
+function Combat:calculateOrientationTowards(fromQ, fromR, toQ, toR)
+    -- Convert to cube coordinates
+    local fromX, fromY, fromZ = self:offsetToCube(fromQ, fromR)
+    local toX, toY, toZ = self:offsetToCube(toQ, toR)
+    
+    -- Calculate direction vector in cube coordinates
+    local dirX = toX - fromX
+    local dirY = toY - fromY
+    local dirZ = toZ - fromZ
+    
+    -- Normalize to get the primary direction
+    local length = math.max(math.abs(dirX), math.abs(dirY), math.abs(dirZ))
+    if length > 0 then
+        dirX = dirX / length
+        dirY = dirY / length
+        dirZ = dirZ / length
+    end
+    
+    -- Map the direction to the closest of the 6 orientations
+    -- This is a simple mapping based on the angle
+    local angle = math.atan2(dirY, dirX)
+    local orientation = math.floor((angle + math.pi) / (math.pi/3)) % 6
+    
+    return orientation
+end
+
+-- Move to the next phase of combat
+function Combat:advanceToNextPhase(battle)
+    -- The phase progression according to RevisedCombatSystem.md:
+    -- 1. Start of Turn (replenish resources)
+    -- 2. Enemy Planning Phase (internal)
+    -- 3. Player Planning Phase (Movement & Rotation) - "playerMovePlanning"
+    -- 4. Resolution Phase (Maneuver) - "maneuverResolution"
+    -- 5. Player Planning Phase (Action) - "playerActionPlanning"
+    -- 6. Resolution Phase (Action) - "actionResolution" or "displayingResult"
+    -- 7. End of Turn -> back to 1
+    
+    -- Current phase determines the next phase
+    if battle.phase == "playerMovePlanning" then
+        -- After player commits a movement plan, advance to maneuver resolution
+        battle.phase = "maneuverResolution"
+        
+        -- Immediately process the maneuver resolution (with animation in the draw function)
+        self:processManeuverResolution(battle)
+        
+    elseif battle.phase == "maneuverResolution" then
+        -- After maneuvers resolve, advance to player action planning
+        battle.phase = "playerActionPlanning"
+        
+    elseif battle.phase == "playerActionPlanning" then
+        -- This transition happens when player confirms an action
+        battle.phase = "actionResolution"
+        
+    elseif battle.phase == "actionResolution" then
+        -- After action resolution, show results
+        battle.phase = "displayingResult"
+        
+    elseif battle.phase == "displayingResult" then
+        -- After player dismisses results, there could be more enemy actions
+        -- or we end the turn
+        -- For now, just end the turn
+        self:startNewTurn(battle)
+        
+        -- Process enemy planning for the new turn
+        self:processEnemyPlanning(battle)
+    end
+    
+    print("Combat phase advanced to: " .. battle.phase)
+end
+
+-- Process maneuver resolution phase
+function Combat:processManeuverResolution(battle)
+    -- Check if both ships have planned moves and rotations
+    if not battle.playerShip.plannedMove or not battle.playerShip.plannedRotation or
+       not battle.enemyShip.plannedMove or not battle.enemyShip.plannedRotation then
+        print("Cannot process maneuver resolution: Missing planned moves or rotations")
+        return false
+    end
+    
+    -- Extract planned moves and rotations
+    local playerStartQ, playerStartR = battle.playerShip.position[1], battle.playerShip.position[2]
+    local playerTargetQ, playerTargetR = battle.playerShip.plannedMove[1], battle.playerShip.plannedMove[2]
+    local playerStartOrientation = battle.playerShip.orientation
+    local playerTargetOrientation = battle.playerShip.plannedRotation
+    
+    local enemyStartQ, enemyStartR = battle.enemyShip.position[1], battle.enemyShip.position[2]
+    local enemyTargetQ, enemyTargetR = battle.enemyShip.plannedMove[1], battle.enemyShip.plannedMove[2]
+    local enemyStartOrientation = battle.enemyShip.orientation
+    local enemyTargetOrientation = battle.enemyShip.plannedRotation
+    
+    -- 1. Update orientations immediately
+    battle.playerShip.orientation = playerTargetOrientation
+    battle.enemyShip.orientation = enemyTargetOrientation
+    
+    -- 2. Check for collision at target destination
+    local collision = false
+    local playerFinalQ, playerFinalR = playerTargetQ, playerTargetR
+    local enemyFinalQ, enemyFinalR = enemyTargetQ, enemyTargetR
+    
+    if playerTargetQ == enemyTargetQ and playerTargetR == enemyTargetR then
+        -- Collision detected - both ships trying to move to the same hex
+        collision = true
+        
+        -- Simple collision rule: both ships stop 1 hex short along their path
+        -- Calculate player's adjusted position
+        local playerDirection = self:calculateDirectionVector(playerStartQ, playerStartR, playerTargetQ, playerTargetR)
+        local playerDistance = self:hexDistance(playerStartQ, playerStartR, playerTargetQ, playerTargetR)
+        
+        if playerDistance > 1 then
+            -- If moving more than 1 hex, stop 1 hex short
+            playerFinalQ = math.floor(playerTargetQ - playerDirection.q + 0.5)
+            playerFinalR = math.floor(playerTargetR - playerDirection.r + 0.5)
+        else
+            -- If only moving 1 hex, stay in place
+            playerFinalQ, playerFinalR = playerStartQ, playerStartR
+        end
+        
+        -- Calculate enemy's adjusted position
+        local enemyDirection = self:calculateDirectionVector(enemyStartQ, enemyStartR, enemyTargetQ, enemyTargetR)
+        local enemyDistance = self:hexDistance(enemyStartQ, enemyStartR, enemyTargetQ, enemyTargetR)
+        
+        if enemyDistance > 1 then
+            -- If moving more than 1 hex, stop 1 hex short
+            enemyFinalQ = math.floor(enemyTargetQ - enemyDirection.q + 0.5)
+            enemyFinalR = math.floor(enemyTargetR - enemyDirection.r + 0.5)
+        else
+            -- If only moving 1 hex, stay in place
+            enemyFinalQ, enemyFinalR = enemyStartQ, enemyStartR
+        end
+        
+        print("Collision detected! Ships stopped short of destination.")
+    end
+    
+    -- 3. Calculate actual SP costs for the moves performed
+    local playerActualMoveCost = self:calculateSPCost(
+        {position = {playerStartQ, playerStartR}, orientation = playerStartOrientation},
+        playerFinalQ, playerFinalR, nil
+    )
+    
+    local playerActualRotationCost = self:calculateSPCost(
+        {position = {playerStartQ, playerStartR}, orientation = playerStartOrientation},
+        nil, nil, playerTargetOrientation
+    )
+    
+    local enemyActualMoveCost = self:calculateSPCost(
+        {position = {enemyStartQ, enemyStartR}, orientation = enemyStartOrientation},
+        enemyFinalQ, enemyFinalR, nil
+    )
+    
+    local enemyActualRotationCost = self:calculateSPCost(
+        {position = {enemyStartQ, enemyStartR}, orientation = enemyStartOrientation},
+        nil, nil, enemyTargetOrientation
+    )
+    
+    -- 4. Deduct SP
+    battle.playerShip.currentSP = math.max(0, battle.playerShip.currentSP - (playerActualMoveCost + playerActualRotationCost))
+    battle.enemyShip.currentSP = math.max(0, battle.enemyShip.currentSP - (enemyActualMoveCost + enemyActualRotationCost))
+    
+    -- 5. Remove ships from their old grid positions
+    self:clearShipFromGrid(battle.grid, battle.playerShip)
+    self:clearShipFromGrid(battle.grid, battle.enemyShip)
+    
+    -- 6. Update ship positions
+    battle.playerShip.position = {playerFinalQ, playerFinalR}
+    battle.enemyShip.position = {enemyFinalQ, enemyFinalR}
+    
+    -- 7. Place ships at their new grid positions
+    self:placeShipOnGrid(battle.grid, battle.playerShip, battle)
+    self:placeShipOnGrid(battle.grid, battle.enemyShip, battle)
+    
+    -- 8. Clear planned moves and rotations (no longer needed)
+    battle.playerShip.plannedMove = nil
+    battle.playerShip.plannedRotation = nil
+    battle.enemyShip.plannedMove = nil
+    battle.enemyShip.plannedRotation = nil
+    
+    -- 9. Advance to next phase (Action Planning)
+    self:advanceToNextPhase(battle)
+    
+    return true
+end
+
 function Combat:hexToScreen(q, r)
     -- For pointy-top hexagons
     local hexWidth = self.HEX_RADIUS * math.sqrt(3)
@@ -7992,6 +9753,10 @@ function Combat:drawHexes(battle, showDebug)
                 -- Red for enemy ship (more transparent)
                 love.graphics.setColor(Constants.COLORS.ENEMY_SHIP[1], Constants.COLORS.ENEMY_SHIP[2], 
                                       Constants.COLORS.ENEMY_SHIP[3], 0.5)
+            elseif self.plannedMoveHex and self.plannedMoveHex[1] == q and self.plannedMoveHex[2] == r then
+                -- Green/yellow pulsing for planned destination
+                local pulse = math.abs(math.sin(love.timer.getTime() * 2))
+                love.graphics.setColor(0.3 + pulse * 0.6, 0.7 + pulse * 0.3, 0.2, 0.6 + pulse * 0.4)
             elseif self.hoveredHex and self.hoveredHex[1] == q and self.hoveredHex[2] == r then
                 love.graphics.setColor(Constants.COLORS.HOVER) -- Yellow for hover
             elseif self.selectedHex and self.selectedHex[1] == q and self.selectedHex[2] == r then
@@ -8033,11 +9798,22 @@ end
 
 -- Check if hex coordinates are in the valid moves list
 function Combat:isValidMove(q, r)
-    for _, move in ipairs(self.validMoves) do
+    -- Debug logging
+    print("Checking if " .. q .. "," .. r .. " is a valid move. Current valid moves: " .. #self.validMoves)
+    
+    if not self.validMoves or #self.validMoves == 0 then
+        print("No valid moves available")
+        return false
+    end
+    
+    for i, move in ipairs(self.validMoves) do
         if move[1] == q and move[2] == r then
+            print("Valid move found: " .. q .. "," .. r .. " (index " .. i .. ")")
             return true
         end
     end
+    
+    print("Not a valid move: " .. q .. "," .. r)
     return false
 end
 
@@ -8112,7 +9888,8 @@ function Combat:drawShipByClass(ship, isPlayer, isSelected, battle)
     local sprite = self.shipSprites[shipClass]
     
     -- Angle based on orientation (60 degrees per orientation step)
-    local angle = orientation * math.pi / 3
+    -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+    local angle = orientation * math.pi / 3 + math.pi / 6
     
     if sprite then
         -- Draw the sprite with proper orientation and scale
@@ -8191,7 +9968,8 @@ function Combat:drawShipIconForUI(x, y, shipClass, orientation, isPlayer, isSele
     local sprite = self.shipSprites[shipClass]
     
     -- Angle based on orientation (60 degrees per orientation step)
-    local angle = orientation * math.pi / 3
+    -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+    local angle = orientation * math.pi / 3 + math.pi / 6
     
     if sprite then
         -- Draw the sprite with proper orientation and scale
@@ -8301,7 +10079,8 @@ function Combat:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, o
         }
         
         -- Adjust rotation based on orientation
-        local angle = orientation * math.pi / 3
+        -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+        local angle = orientation * math.pi / 3 + math.pi / 6
         
         -- Rotate and translate points
         local rotatedPoints = {}
@@ -8336,7 +10115,8 @@ function Combat:drawShipFallbackShape(x, y, shipClass, orientation, baseColor, o
         }
         
         -- Adjust rotation based on orientation
-        local angle = orientation * math.pi / 3
+        -- Add pi/6 (30 degrees) to make ships face flat sides instead of points
+        local angle = orientation * math.pi / 3 + math.pi / 6
         
         -- Rotate and translate points
         local rotatedPoints = {}
@@ -8451,10 +10231,12 @@ function Combat:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, play
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.print(playerHP .. "/" .. playerMaxHP, 50, gridTop + 142)
     
-    -- Draw moves or crew points based on phase
-    if battle.phase == "movement" then
-        self:drawMovementInfo(battle.playerShip, gridTop, sidebarWidth)
+    -- Draw SP and CP based on phase
+    if battle.phase == "playerMovePlanning" or battle.phase == "maneuverResolution" then
+        -- Show SP for movement planning phases
+        self:drawSailPointsInfo(battle.playerShip, gridTop, sidebarWidth)
     else
+        -- Show CP for action phases
         self:drawCrewPointsInfo(battle.playerShip, gridTop, sidebarWidth)
     end
     
@@ -8469,15 +10251,28 @@ function Combat:drawPlayerSidebar(battle, gameState, playerHP, playerMaxHP, play
     love.graphics.print("WEEK: " .. gameState.time.currentWeek, 15, gridBottom - 30)
 end
 
--- Draw movement info for a ship
-function Combat:drawMovementInfo(ship, gridTop, sidebarWidth)
+-- Draw Sail Points (SP) info for a ship
+function Combat:drawSailPointsInfo(ship, gridTop, sidebarWidth)
     love.graphics.setColor(1, 1, 1, 0.8)
-    love.graphics.print("MOVEMENT:", 15, gridTop + 165)
-    local baseSpeed = shipUtils.getBaseSpeed(ship.class)
-    local movePercent = ship.movesRemaining / baseSpeed
-    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, movePercent, Constants.COLORS.BUTTON_EVADE, Constants.COLORS.UI_BORDER)
+    love.graphics.print("SAIL POINTS:", 15, gridTop + 165)
+    local spPercent = ship.currentSP / ship.maxSP
+    self:drawProgressBar(15, gridTop + 185, sidebarWidth - 30, 16, spPercent, Constants.COLORS.BUTTON_EVADE, Constants.COLORS.UI_BORDER)
     love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.print(ship.movesRemaining .. "/" .. baseSpeed, 50, gridTop + 187)
+    love.graphics.print(ship.currentSP .. "/" .. ship.maxSP, 50, gridTop + 187)
+    
+    -- Display any planned move SP cost
+    if self.plannedMoveHex and self.plannedRotation then
+        local cost = self:calculateSPCost(ship, self.plannedMoveHex[1], self.plannedMoveHex[2], self.plannedRotation)
+        if cost > 0 then
+            love.graphics.setColor(1, 0.8, 0.2, 1) -- Gold/yellow for costs
+            love.graphics.print("PLANNED COST: " .. cost .. " SP", 15, gridTop + 210)
+        end
+    end
+end
+
+-- Draw movement info for a ship (legacy function, kept for compatibility)
+function Combat:drawMovementInfo(ship, gridTop, sidebarWidth)
+    self:drawSailPointsInfo(ship, gridTop, sidebarWidth)
 end
 
 -- Draw crew points info for a ship
@@ -8516,10 +10311,22 @@ function Combat:drawEnemySidebar(battle, enemyHP, enemyMaxHP, enemyHP_Percent, l
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.print(enemyHP .. "/" .. enemyMaxHP, screenWidth - sidebarWidth + 50, gridTop + 142)
     
-    -- Draw enemy ship additional info
+    -- Draw enemy ship additional info: SP and Evade Score
+    local yPos = gridTop + 165
+    
+    -- Show SP in movement planning phases
+    if battle.phase == "playerMovePlanning" or battle.phase == "maneuverResolution" then
+        love.graphics.setColor(0.4, 0.6, 0.9, 1) -- Blue for SP
+        love.graphics.print("SAIL POINTS: " .. battle.enemyShip.currentSP .. "/" .. battle.enemyShip.maxSP, 
+                           screenWidth - sidebarWidth + 15, yPos)
+        yPos = yPos + 25
+    end
+    
+    -- Show evade score if it exists
     if battle.enemyShip.evadeScore > 0 then
         love.graphics.setColor(0.9, 0.7, 0.3, 1)
-        love.graphics.print("EVADE SCORE: " .. battle.enemyShip.evadeScore, screenWidth - sidebarWidth + 15, gridTop + 165)
+        love.graphics.print("EVADE SCORE: " .. battle.enemyShip.evadeScore, 
+                           screenWidth - sidebarWidth + 15, yPos)
     end
 end
 
@@ -8651,9 +10458,18 @@ function Combat:drawActionPanel(battle, buttonsY, layout)
     
     -- Different controls based on phase
     if battle.turn == "player" then
-        if battle.phase == "action" then
+        if battle.phase == "playerActionPlanning" or battle.phase == "actionResolution" then
+            -- Action phase - show action buttons
             self:drawActionButtons(battle, buttonsY, screenWidth, layout.sidebarWidth)
+        elseif battle.phase == "playerMovePlanning" then
+            -- Movement planning phase - show maneuver planning controls
+            self:drawManeuverPlanningControls(battle, buttonsY, screenWidth)
+        elseif battle.phase == "maneuverResolution" then
+            -- Maneuver resolution phase - show resolving message
+            love.graphics.setColor(0.7, 0.7, 0.7, 0.7)
+            love.graphics.printf("RESOLVING MANEUVERS...", 0, buttonsY + 15, screenWidth, "center")
         else
+            -- Legacy fallback
             self:drawMovementControls(battle, buttonsY, screenWidth)
         end
     else
@@ -8663,7 +10479,86 @@ function Combat:drawActionPanel(battle, buttonsY, layout)
     end
 end
 
--- Draw the action buttons
+-- Draw the maneuver planning controls
+function Combat:drawManeuverPlanningControls(battle, buttonsY, screenWidth)
+    local buttonSpacing = 20
+    local buttonWidth = 120
+    local buttonHeight = 30
+    
+    -- First draw instructions
+    love.graphics.setColor(1, 1, 1, 0.8)
+    
+    -- Different instructions based on whether destination is selected
+    if self.plannedMoveHex then
+        -- If destination selected, prompt for rotation
+        love.graphics.printf("CHOOSE FINAL ORIENTATION", 0, buttonsY + 5, screenWidth, "center")
+    else
+        -- If no destination, prompt to select one
+        love.graphics.printf("SELECT DESTINATION HEX", 0, buttonsY + 5, screenWidth, "center")
+    end
+    
+    -- Draw rotation controls if we have a planned move
+    if self.plannedMoveHex then
+        -- Rotation controls - Calculate button positions
+        local totalWidth = (2 * buttonWidth) + buttonSpacing
+        local startX = (screenWidth - totalWidth) / 2
+        
+        -- Store button hitboxes for interaction
+        self.rotationButtons = {
+            rotateLeft = {
+                x = startX,
+                y = buttonsY + 25,
+                width = buttonWidth,
+                height = buttonHeight
+            },
+            rotateRight = {
+                x = startX + buttonWidth + buttonSpacing,
+                y = buttonsY + 25,
+                width = buttonWidth,
+                height = buttonHeight
+            }
+        }
+        
+        -- Draw the rotation buttons
+        love.graphics.setColor(0.4, 0.7, 0.9, 0.9) -- Blue for rotation
+        love.graphics.rectangle("fill", self.rotationButtons.rotateLeft.x, self.rotationButtons.rotateLeft.y, 
+                              self.rotationButtons.rotateLeft.width, self.rotationButtons.rotateLeft.height)
+        love.graphics.rectangle("fill", self.rotationButtons.rotateRight.x, self.rotationButtons.rotateRight.y, 
+                              self.rotationButtons.rotateRight.width, self.rotationButtons.rotateRight.height)
+        
+        -- Button text
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.printf("ROTATE LEFT", self.rotationButtons.rotateLeft.x, self.rotationButtons.rotateLeft.y + 8, buttonWidth, "center")
+        love.graphics.printf("ROTATE RIGHT", self.rotationButtons.rotateRight.x, self.rotationButtons.rotateRight.y + 8, buttonWidth, "center")
+        
+        -- If both move and rotation are planned, show confirm button
+        if self.plannedRotation ~= nil then
+            -- Calculate total cost
+            local cost = self:calculateSPCost(battle.playerShip, self.plannedMoveHex[1], self.plannedMoveHex[2], self.plannedRotation)
+            local affordable = cost <= battle.playerShip.currentSP
+            
+            -- Confirm button
+            self.confirmManeuverButton = {
+                x = (screenWidth - buttonWidth) / 2,
+                y = buttonsY + 60,
+                width = buttonWidth,
+                height = buttonHeight
+            }
+            
+            -- Draw confirm button with color based on affordability
+            local buttonColor = affordable and {0.2, 0.8, 0.2, 0.9} or {0.8, 0.2, 0.2, 0.9}
+            love.graphics.setColor(buttonColor)
+            love.graphics.rectangle("fill", self.confirmManeuverButton.x, self.confirmManeuverButton.y,
+                                 self.confirmManeuverButton.width, self.confirmManeuverButton.height)
+            
+            -- Confirm button text
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.printf("CONFIRM (" .. cost .. " SP)", self.confirmManeuverButton.x, 
+                              self.confirmManeuverButton.y + 8, buttonWidth, "center")
+        end
+    end
+end
+
 function Combat:drawActionButtons(battle, buttonsY, screenWidth, sidebarWidth)
     -- Center buttons in the available space
     local buttonSpacing = 20
@@ -8815,10 +10710,18 @@ function Combat:drawInstructionsPanel(battle, buttonsY, layout)
     love.graphics.setColor(1, 1, 1, 0.9)
     local instructions = ""
     if battle.turn == "player" then
-        if battle.phase == "movement" then
+        if battle.phase == "playerMovePlanning" then
+            instructions = "PLANNING PHASE: Select destination hex and rotation (SP: " .. battle.playerShip.currentSP .. "/" .. battle.playerShip.maxSP .. ")"
+        elseif battle.phase == "maneuverResolution" then
+            instructions = "RESOLVING MANEUVERS: Please wait..."
+        elseif battle.phase == "playerActionPlanning" then
+            instructions = "ACTION PHASE: Select action to perform"
+        elseif battle.phase == "movement" then
             instructions = "MOVEMENT PHASE: Click your ship, then click a blue hex to move"
         elseif battle.phase == "action" then
             instructions = "ACTION PHASE: Click a button to perform an action"
+        else
+            instructions = "PHASE: " .. battle.phase
         end
     else
         instructions = "ENEMY TURN: Please wait..."
@@ -8948,7 +10851,26 @@ function Combat:mousemoved(x, y, gameState)
     if not gameState.combat then return end
     
     -- Update hovered hex
+    local oldHoveredHex = self.hoveredHex
     self.hoveredHex = self:getHexFromScreen(x, y)
+    
+    -- Auto-select player ship if not already selected
+    if gameState.combat.phase == "playerMovePlanning" and not self.selectedHex and gameState.combat.playerShip then
+        self.selectedHex = {gameState.combat.playerShip.position[1], gameState.combat.playerShip.position[2]}
+        self:calculateValidMoves(gameState.combat, gameState.combat.playerShip)
+        print("Auto-selected player ship in mousemoved")
+    end
+    
+    -- Debug output when hovering changes
+    if self.hoveredHex and (not oldHoveredHex or 
+                          oldHoveredHex[1] ~= self.hoveredHex[1] or 
+                          oldHoveredHex[2] ~= self.hoveredHex[2]) then
+        if self.hoveredHex then
+            local q, r = self.hoveredHex[1], self.hoveredHex[2]
+            local isValid = self:isValidMove(q, r)
+            print("Now hovering over hex " .. q .. "," .. r .. " - " .. (isValid and "VALID move" or "NOT a valid move"))
+        end
+    end
 end
 
 -- Helper function to check if a point is inside a button
@@ -8967,6 +10889,32 @@ function Combat:drawButtonHitbox(buttonX, buttonY, buttonWidth, buttonHeight)
         love.graphics.setColor(1, 0, 0, 0.8)
         love.graphics.circle("fill", buttonX + buttonWidth/2, buttonY + buttonHeight/2, 2)
     end
+end
+
+-- Check if a point is within the hex grid area
+function Combat:isPointInGridArea(x, y, layout)
+    -- Print debug tracking to help debug the issue
+    print("Checking if point " .. x .. "," .. y .. " is in grid area")
+    
+    -- Use layout constants to determine grid boundaries
+    local gridTop = layout.gridTop or 0
+    local gridBottom = layout.gridBottom or love.graphics.getHeight()
+    local sidebarWidth = layout.sidebarWidth or 100
+    local screenWidth = layout.screenWidth or love.graphics.getWidth()
+    
+    -- Calculate grid area boundaries
+    local gridLeft = sidebarWidth
+    local gridRight = screenWidth - sidebarWidth
+    
+    -- Debug output
+    print("Grid area: " .. gridLeft .. "," .. gridTop .. " to " .. gridRight .. "," .. gridBottom)
+    
+    -- Check if point is within the grid area
+    local inGrid = (x >= gridLeft and x <= gridRight and y >= gridTop and y <= gridBottom)
+    print("Point is " .. (inGrid and "INSIDE" or "OUTSIDE") .. " grid area")
+    
+    -- Always return true for now to debug hex selection
+    return true
 end
 
 -- Handle mouse clicks
@@ -8994,12 +10942,28 @@ function Combat:mousepressed(x, y, button, gameState)
     end
     
     -- If not clicking buttons, check for hex grid interactions
-    -- (but only if click is inside the grid area)
-    if self:isPointInGridArea(x, y, layout) then
-        if battle.turn == "player" and battle.phase == "movement" then
-            self:handleHexClick(x, y, battle, gameState)
+    -- Skip the grid area check to help debug problems
+    --if self:isPointInGridArea(x, y, layout) then
+        print("Checking for hex interactions")
+        if battle.turn == "player" then
+            if battle.phase == "playerMovePlanning" then
+                -- Handle the new maneuver planning phase
+                local handled = self:handleManeuverPlanningClick(x, y, battle)
+                print("Maneuver planning click handled: " .. tostring(handled))
+                
+                -- Debug: if clicks aren't working, force calculate valid moves
+                if not handled then
+                    print("Click not handled - recalculating valid moves")
+                    self.validMoves = {}
+                    self.selectedHex = {battle.playerShip.position[1], battle.playerShip.position[2]}
+                    self:calculateValidMoves(battle, battle.playerShip)
+                end
+            elseif battle.phase == "movement" then
+                -- Legacy movement handling
+                self:handleHexClick(x, y, battle, gameState)
+            end
         end
-    end
+    --end
 end
 
 -- Calculate the Y position for the buttons panel
@@ -9755,6 +11719,10 @@ local Constants = {
         CP_COST_FIRE = 1,                       -- Fire cannons cost 1 CP
         CP_COST_EVADE = 1,                      -- Evade costs 1 CP
         CP_COST_REPAIR = 2,                     -- Repair costs 2 CP
+        
+        -- Sail Point (SP) Costs
+        SP_COST_MOVE_HEX = 1,                   -- Cost to move one hex
+        SP_COST_ROTATE_60 = 1,                  -- Cost to rotate 60 degrees
         
         -- Damage Values
         DAMAGE_CRITICAL = 3,                    -- Critical hit damage
@@ -13902,6 +15870,216 @@ As the game progresses through development, these zones will gain additional pro
 - Tactical combat scenarios
 
 Each zone will develop a distinct personality that affects gameplay and provides unique strategic opportunities for the aspiring pirate captain.
+
+## docs/RevisedCombatSystem.md
+# Pirate's Wager: Blood for Gold - Combat Rules (Revised)
+
+## 1. Overview
+
+This document outlines the rules for the tactical naval combat system in Pirate's Wager: Blood for Gold. Combat takes place on a 10x10 hex grid and emphasizes simultaneous maneuver planning, prediction, resource management (Sail Points & Crew Points), and risk/reward dice mechanics inspired by Forged in the Dark (FitD).
+
+## 2. Key Concepts
+
+*   **Hex Grid:** A 10x10 grid using pointy-top hexes and axial coordinates (q, r).
+*   **Simultaneous Maneuvering:** Player and AI plan their movement and rotation secretly, and these maneuvers are resolved simultaneously.
+*   **Sail Points (SP):** A per-turn resource representing a ship's agility, used to plan movement (moving hexes) and rotation (changing facing). SP varies by ship class.
+*   **Crew Points (CP):** A per-turn resource representing the crew's capacity for action, used to execute combat actions like firing cannons, evading, or repairing. CP varies by ship class and current crew count (for the player).
+*   **Orientation & Firing Arcs:** Ships have a specific facing (orientation). Weapons can only target hexes within defined firing arcs relative to the ship's current orientation.
+*   **FitD Dice Mechanics:** Actions are resolved by rolling a pool of d6s. The highest die determines the outcome: Critical (multiple 6s), Success (highest is 6), Partial Success (highest is 4-5), or Failure (highest is 1-3).
+
+## 3. Battlefield & Ships
+
+*   **Grid:** 10x10 hexes.
+*   **Ship Representation:**
+    *   Ships occupy 1-4 hexes based on class.
+    *   Each ship has a central anchor hex (`position {q, r}`) and an `orientation` (0-5, representing 60° increments, 0=North).
+    *   Ship shapes rotate based on orientation.
+*   **Ship Classes & Base Stats:**
+
+    | Class      | Hex Size/Shape | Max HP | Base Max SP | Base Max CP | Base Speed (Moves/Turn) | Base Firepower (Dice) | Firing Arcs          |
+    | :--------- | :------------- | :----- | :---------- | :---------- | :---------------------- | :-------------------- | :------------------- |
+    | Sloop      | 1 hex          | 10     | 5           | 2 (*Note 1*) | 3                       | 1                     | Forward Only         |
+    | Brigantine | 2 hexes (line) | 20     | 4           | 4 (*Note 1*) | 2                       | 3                     | Broadsides (Sides)   |
+    | Galleon    | 4 hexes (kite) | 40     | 3           | 6 (*Note 1*) | 1                       | 6                     | Broadsides (Sides)   |
+
+    *Note 1: Player ship's Max CP is based on `#gameState.crew.members`, capped by ship capacity. Enemy Max CP uses these base values.*
+
+## 4. Combat Turn Structure
+
+Each combat turn follows this sequence:
+
+1.  **Start of Turn:**
+    *   Replenish `currentSP` to `maxSP` for both ships.
+    *   Replenish `currentCP` to `maxCP` for both ships.
+    *   Clear any temporary turn-based effects or states (e.g., evade scores from previous turns if applicable, planned moves/rotations).
+    *   Advance turn counter (`gameState.combat.turnCount`).
+
+2.  **Enemy Planning Phase (Internal):**
+    *   AI determines its intended maneuver (`plannedMove` hex and `plannedRotation` orientation).
+    *   AI calculates SP cost and ensures the plan is affordable. Revises if necessary.
+    *   AI determines its intended action(s) for the Action Phase (based on anticipated post-maneuver state).
+    *   *Plans are stored internally, not revealed to the player.*
+
+3.  **Player Planning Phase (Movement & Rotation):** (`gameState.combat.phase = "playerMovePlanning"`)
+    *   Player sees current board state, their available SP.
+    *   Player selects a target **orientation** using UI controls.
+    *   Player selects a target **destination hex** from valid moves.
+    *   UI displays SP cost for the planned move path + planned rotation change.
+    *   Player cannot confirm a plan costing more than `currentSP`.
+    *   Player **commits** the maneuver plan (stores destination in `playerShip.plannedMove`, final orientation in `playerShip.plannedRotation`).
+
+4.  **Resolution Phase (Maneuver):** (`gameState.combat.phase = "maneuverResolution"`)
+    *   **Rotation Update:** Internal `ship.orientation` state is instantly updated for *both* ships based on their `plannedRotation`.
+    *   **Collision Check:** Check if `plannedMove` destinations conflict. Adjust `plannedMove` destinations for involved ships according to collision rules (e.g., stop 1 hex short).
+    *   **Movement Execution & SP Deduction:**
+        *   Animate both ships rotating towards their new orientation *while* moving towards their (potentially adjusted) destination hexes.
+        *   Calculate the *actual* SP cost incurred for the maneuver performed (actual hexes moved + rotation steps).
+        *   Deduct SP: `ship.currentSP -= actualCost`.
+        *   Update internal `ship.position` state upon animation completion.
+    *   Clear `plannedMove` and `plannedRotation` for both ships.
+
+5.  **Player Planning Phase (Action):** (`gameState.combat.phase = "playerActionPlanning"`)
+    *   Player sees the board state *after* maneuvers have resolved.
+    *   Player selects actions (Fire, Evade, Repair, etc.) using available **CP**.
+    *   Targeting for actions like "Fire Cannons" is constrained by the ship's current orientation and **firing arcs**.
+    *   Selecting an action leads to the Confirmation Window (showing dice/modifiers/cost).
+    *   Player Confirms or Cancels the action.
+
+6.  **Resolution Phase (Action):** (`gameState.combat.phase = "actionResolution" or "displayingResult"`)
+    *   If player confirmed action: Deduct CP, roll dice, determine outcome, apply effects (damage, repair, evade score).
+    *   Display action results dynamically (dice roll visualization, outcome text, effect summary).
+    *   AI executes its planned action(s) sequentially, using its remaining CP. AI targeting also respects firing arcs. Results are displayed dynamically.
+
+7.  **End of Turn:**
+    *   Perform any end-of-turn cleanup (e.g., expire temporary effects).
+    *   Check win/loss conditions.
+    *   Loop back to Start of Turn for the next turn number.
+
+## 5. Core Mechanics Deep Dive
+
+### 5.1. Sail Points (SP)
+
+*   **Purpose:** Governs maneuverability (movement and rotation).
+*   **Replenishment:** Fully restored to `maxSP` at the start of each turn.
+*   **Costs (Planned - Subject to Tuning):**
+    *   Move 1 Hex: 1 SP
+    *   Rotate 60° (1 facing change): 1 SP
+*   **Planning:** SP cost is calculated based on the planned path distance + the number of 60° steps needed to reach the planned orientation. The maneuver cannot be committed if `Total Cost > currentSP`.
+*   **Deduction:** SP is deducted during the Maneuver Resolution phase based on the *actual* movement and rotation performed (after collision checks).
+
+### 5.2. Crew Points (CP)
+
+*   **Purpose:** Governs the crew's ability to perform actions (combat, repair, etc.).
+*   **Replenishment:** Fully restored to `maxCP` at the start of each turn.
+*   **Source:**
+    *   Player: Number of crew members currently on ship (`#gameState.crew.members`), capped by ship's `crewCapacity`.
+    *   Enemy: Based on ship class (`shipUtils.getBaseCP`).
+*   **Costs:** Defined per action (see Actions List).
+*   **Usage:** Spent during the Action Planning/Resolution phases to execute actions. Multiple actions can be performed if enough CP is available.
+
+### 5.3. Movement & Rotation
+
+*   **Planning:** Player/AI select both a target hex and a target orientation during their respective planning phases, constrained by SP.
+*   **Resolution:** Planned rotations and moves resolve simultaneously during the Maneuver Resolution phase. Ship orientations update instantly internally, while visual rotation tweens alongside movement animation. SP is deducted based on the resolved maneuver.
+
+### 5.4. Firing Arcs
+
+*   **Definition:** Each ship class has defined arcs relative to its forward direction (Orientation 0).
+    *   **Forward:** Directly ahead.
+    *   **Sides (Broadsides):** To the left and right flanks.
+    *   **Rear:** Directly behind.
+*   **Constraint:** The "Fire Cannons" action can only target hexes that fall within an active firing arc based on the ship's *current* orientation (after maneuvering).
+*   **Implementation:** `Combat:isInFiringArc(ship, targetQ, targetR)` checks validity. `Combat:getFiringArcHexes(ship)` calculates all valid target hexes within range.
+
+### 5.5. Dice Rolls & Outcomes (FitD)
+
+*   **Rolling:** Actions trigger a roll of 1-5 d6s. The pool size = Base Dice (from ship/action) + Modifiers (from crew, situation, evade scores). Max 5 dice.
+*   **Zero Dice:** If modifiers reduce the pool to 0 or less, roll 2d6 and take the *lowest* result.
+*   **Interpretation:** Determined by the *single highest die* rolled:
+    *   **Critical Success:** Multiple 6s rolled. (Outcome Level 3)
+    *   **Success:** Highest die is a 6. (Outcome Level 2)
+    *   **Partial Success:** Highest die is 4 or 5. (Outcome Level 1)
+    *   **Failure:** Highest die is 1, 2, or 3. (Outcome Level 0)
+*   **Effects:** Actions have different effects based on the Outcome Level achieved (see Actions List).
+
+### 5.6. Collisions
+
+*   **Detection:** Checked during Maneuver Resolution based on `plannedMove` destinations.
+*   **Rule (Basic):** If two ships plan to move to the same hex, both stop 1 hex short along their planned path. Their orientation changes still resolve as planned. SP cost is adjusted based on actual distance moved. *(More complex rules can be added later)*.
+
+## 6. Actions List
+
+Actions are performed during the Action Phase using CP. Player actions require confirmation via the Confirmation Window.
+
+*   **Fire Cannons**
+    *   **CP Cost:** `Constants.COMBAT.CP_COST_FIRE` (1 CP)
+    *   **Targeting:** Requires selecting an enemy ship hex within a valid firing arc and range.
+    *   **Dice Pool:** `shipUtils.getBaseFirepowerDice(ship.class)` + Modifiers.
+    *   **Modifiers:**
+        *   `+1` Point Blank (adjacent hex)
+        *   `-X` Target Evading (where X is target's `evadeScore`)
+        *   `+Y` Gunner Skill (Player only: `member.skill * Constants.GAME.GUNNER_SKILL_MULTIPLIER`)
+        *   +/- Other situational/temporary modifiers.
+    *   **Effects:**
+        *   Critical (Lvl 3): `Constants.COMBAT.DAMAGE_CRITICAL` (3 HP) damage.
+        *   Success (Lvl 2): `Constants.COMBAT.DAMAGE_SUCCESS` (2 HP) damage.
+        *   Partial (Lvl 1): `Constants.COMBAT.DAMAGE_PARTIAL` (1 HP) damage.
+        *   Failure (Lvl 0): No damage.
+    *   **Note:** Target's `evadeScore` is reset to 0 *after* being applied to the incoming attack roll.
+
+*   **Evade**
+    *   **CP Cost:** `Constants.COMBAT.CP_COST_EVADE` (1 CP)
+    *   **Targeting:** Self.
+    *   **Dice Pool:** `shipUtils.getBaseSpeed(ship.class)` + Modifiers.
+    *   **Modifiers:**
+        *   +/- Other situational/temporary modifiers.
+    *   **Effects:** Sets the ship's `evadeScore` for the *next* turn (or until used).
+        *   Critical (Lvl 3): `evadeScore = 3`
+        *   Success (Lvl 2): `evadeScore = 2`
+        *   Partial (Lvl 1): `evadeScore = 1`
+        *   Failure (Lvl 0): `evadeScore = 0`
+    *   **Note:** `evadeScore` reduces the number of dice rolled by enemies attacking this ship.
+
+*   **Repair**
+    *   **CP Cost:** `Constants.COMBAT.CP_COST_REPAIR` (2 CP)
+    *   **Targeting:** Self.
+    *   **Dice Pool:** 1 (Base) + Modifiers.
+    *   **Modifiers:**
+        *   `+Y` Surgeon Skill (Player only: `member.skill`)
+        *   +/- Other situational/temporary modifiers.
+    *   **Effects:** Restores ship durability (HP).
+        *   Critical (Lvl 3): `+Constants.COMBAT.REPAIR_CRITICAL` (15 HP) restored.
+        *   Success (Lvl 2): `+Constants.COMBAT.REPAIR_SUCCESS` (10 HP) restored.
+        *   Partial (Lvl 1): `+Constants.COMBAT.REPAIR_PARTIAL` (5 HP) restored.
+        *   Failure (Lvl 0): No HP restored.
+    *   **Note:** Cannot repair above the ship's maximum durability.
+
+*   **End Turn** (Player Only Action Menu Option)
+    *   **CP Cost:** 0 CP
+    *   **Effect:** Immediately ends the player's action planning phase and proceeds to the enemy's action resolution (if applicable) or the start of the next turn.
+
+## 7. AI Behavior
+
+*   Enemy AI plans its maneuver (move + rotation) within its SP budget during the Enemy Planning Phase.
+*   Enemy AI plans its action(s) based on its anticipated post-maneuver state (e.g., choosing Fire Cannons only if the player is expected to be in arc).
+*   During the Action Resolution Phase, the AI executes its planned actions sequentially using its available CP, respecting firing arcs based on its *actual* post-maneuver position/orientation.
+*   Current AI prioritizes: Repair (if low HP), Evade (if moderate HP), Fire Cannons (if high HP and target in arc), Move closer/into arc.
+
+## 8. Winning & Losing
+
+*   **Victory:** Enemy ship durability reaches 0 HP. Player may receive loot. Combat ends, return to Exploration mode.
+*   **Defeat:** Player ship durability reaches 0 HP. Results in Game Over (current implementation).
+*   **Retreat:** (Future Feature) Player or enemy moves off the battle grid. May involve a dice roll to determine success.
+
+## 9. UI Summary
+
+*   **Minimal HUD:** Displays Turn/Phase, Player HP/CP/SP, Enemy HP.
+*   **Ship Info Window:** On-demand details via hover.
+*   **Action Menu:** Contextual list of actions available during player action planning.
+*   **Confirmation Window:** Displays dice pool breakdown, modifiers, and costs before committing an action.
+*   **Result Overlay:** Temporarily displays dice results and effects after an action resolves.
+*   **Maneuver Planning:** Visual feedback for planned path, orientation, and SP cost.
+*   **Firing Arc Highlight:** Visual indication of valid target hexes when planning "Fire Cannons".
 
 ## docs/TimeSystem.md
 # Time System Documentation
@@ -15318,4 +17496,512 @@ Notes:
 
 Keep outcomes simple (e.g., fixed loot); expand in Sprint 4.
 Loss condition can trigger a game over screen; refine later.
+
+## Tickets/3-x-1-refactor-combat-state-and-turn-loop-for-sp.md
+Refactor Combat State & Turn Loop for SP/Planning
+
+Description: Modify the combat state (gameState.combat) and the main combat loop in combat.lua to accommodate the new Sail Point (SP) resource, planned maneuvers (move + rotation), and the revised turn structure (Planning -> Resolution phases).
+
+Tasks:
+
+Modify gameState.combat ship objects (playerShip, enemyShip) to include:
+
+currentSP: Current sail points for the turn.
+
+maxSP: Maximum sail points (based on ship class: Sloop=5, Brigantine=4, Galleon=3). Initialize this in Combat:initBattle.
+
+plannedMove: Table {q, r} storing the intended destination hex (or nil).
+
+plannedRotation: Number 0-5 storing the intended final orientation (or nil).
+
+Refactor the main combat turn progression logic in combat.lua (likely affecting endPlayerTurn, processEnemyTurn, finalizeEnemyTurn, and potentially needing new phase-handling functions) to follow the new structure:
+
+Start of Turn: Replenish CP and SP. Clear plannedMove, plannedRotation for both ships.
+
+Enemy Planning Phase (internal logic placeholder).
+
+Player Planning Phase (Movement & Rotation).
+
+Resolution Phase (Maneuver).
+
+Player Planning Phase (Action).
+
+Resolution Phase (Action).
+
+End of Turn.
+
+Ensure SP is replenished correctly at the start of each ship's turn segment or the overall turn start.
+
+Acceptance Criteria:
+
+gameState.combat correctly stores currentSP, maxSP, plannedMove, and plannedRotation for both ships.
+
+maxSP is correctly initialized based on ship class in initBattle.
+
+SP is replenished at the start of the turn.
+
+The main combat loop structure in combat.lua reflects the new phases in the correct order (even if some phases are currently empty placeholders).
+
+Game transitions between these new phases correctly.
+
+Notes: This is a foundational structural change. Subsequent tickets depend heavily on this. Focus on the state and loop structure first; detailed logic for each phase comes next.
+
+## Tickets/3-x-2-implement-maneuver-planning-ui-and-logic-for-player.md
+Implement Maneuver Planning UI & Logic (Player)
+
+Description: Develop the UI and input handling for the Player Planning (Movement & Rotation) phase, allowing the player to select a destination hex and final orientation, constrained by available Sail Points (SP).
+
+Tasks:
+
+Define SP costs in constants.lua or combat.lua: SP_COST_MOVE_HEX = 1, SP_COST_ROTATE_60 = 1.
+
+Create helper function Combat:calculateManeuverCost(startHex, endHex, startOrientation, endOrientation) that returns the total SP cost for a potential maneuver (path distance + rotation steps). Use hexDistance for path distance. Calculate rotation steps efficiently (e.g., min(abs(end - start), 6 - abs(end - start))).
+
+Modify Combat:drawUI or a related drawing function:
+
+Display currentSP / maxSP in the minimal player HUD.
+
+Modify Combat:draw (or a planning-phase specific draw function):
+
+When the player ship is selected during the playerMovePlanning phase:
+
+Show valid move hexes (potentially color-coded by SP cost).
+
+Display UI elements for selecting target orientation (e.g., "Rotate Left"/"Rotate Right" buttons near the ship or in a fixed UI panel). Update a temporary variable holding the player's intended rotation.
+
+Display the calculated SP cost breakdown for the hovered/selected move and the intended rotation change (e.g., "Move: 2 SP | Rotate: 1 SP | Total: 3 SP / 5 SP").
+
+Modify Combat:mousepressed for the playerMovePlanning phase:
+
+Handle clicks on rotation controls to update the temporary intended rotation.
+
+Handle clicks on valid move hexes.
+
+Implement a "Confirm Maneuver" button or mechanism.
+
+When confirming: Check if totalCalculatedSPCost <= gameState.combat.playerShip.currentSP.
+
+If affordable, store the selected destination hex in playerShip.plannedMove and the final orientation in playerShip.plannedRotation.
+
+Transition gameState.combat.phase to the next phase (Maneuver Resolution).
+
+If unaffordable, provide visual/audio feedback and do not commit/transition.
+
+Acceptance Criteria:
+
+Player UI clearly displays current/max SP.
+
+Player can select a destination hex and a target orientation using UI controls.
+
+The UI dynamically shows the SP cost for the planned move and rotation.
+
+The player is prevented from confirming a maneuver that costs more SP than they have.
+
+Confirming an affordable maneuver stores plannedMove and plannedRotation in gameState.combat.playerShip and advances the combat phase.
+
+Notes: UI clarity is paramount here (Known Weakness!). Use clear visual cues for costs and affordability. Rotation controls need careful design for the low-res environment (maybe simple arrows?). Depends on Ticket 3.X.1.
+
+## Tickets/3-x-3-implement-maneuver-planning-logic-for-ai.md
+Implement Maneuver Planning Logic (AI)
+
+Description: Update the enemy AI logic to plan both a destination hex (plannedMove) and a final orientation (plannedRotation) during its planning phase, ensuring the combined maneuver is affordable within its SP budget.
+
+Tasks:
+
+Modify AI functions (processEnemyTurn, potentially creating a new planEnemyManeuver function):
+
+AI logic should determine both a target hex (targetQ, targetR) and a target orientation (targetOrientation). (Initial AI can be simple: move towards player, orient towards player).
+
+Call Combat:calculateManeuverCost using the AI ship's current state and its targets.
+
+Check if calculatedCost <= gameState.combat.enemyShip.currentSP.
+
+If affordable, store the targets in enemyShip.plannedMove and enemyShip.plannedRotation.
+
+If unaffordable, AI must revise its plan (e.g., shorter move, less rotation, or do nothing). Implement a simple fallback (e.g., stay put, no rotation).
+
+Ensure AI planning happens before the Player Planning phase, storing the plan internally without revealing it.
+
+Acceptance Criteria:
+
+Enemy AI calculates the SP cost for its intended move and rotation.
+
+AI successfully plans an affordable maneuver (move + rotation) and stores it in enemyShip.plannedMove and enemyShip.plannedRotation.
+
+AI has a fallback behavior if its desired maneuver is too expensive.
+
+Notes: AI complexity can be increased later. The core requirement is planning both aspects within the SP budget. Depends on Ticket 3.X.1 and the calculateManeuverCost function from 3.X.2.
+
+## Tickets/3-x-4-implement-maneuver-resolution.md
+ Implement Maneuver Resolution (Simultaneous)
+
+Description: Implement the core logic for the Maneuver Resolution phase where both player and enemy ships simultaneously execute their planned rotations and movements, handling collisions and deducting SP.
+
+Tasks:
+
+Create logic within the maneuverResolution phase handler in combat.lua.
+
+Collision Check: Before movement, check if playerShip.plannedMove and enemyShip.plannedMove result in the same destination hex or if paths cross in a way that implies collision (simplest: check destination hex conflict). Define a collision rule (e.g., both ships stop one hex short of their plannedMove along their path). Update plannedMove for affected ships if a collision occurs.
+
+Rotation Update: Instantly update playerShip.orientation = playerShip.plannedRotation and enemyShip.orientation = enemyShip.plannedRotation.
+
+Movement & SP Deduction:
+
+For both ships, determine the actual path taken (original plannedMove or adjusted plannedMove after collision).
+
+Calculate the actual SP cost incurred using Combat:calculateManeuverCost based on the start position/orientation and the actual end position/orientation.
+
+Deduct cost: ship.currentSP = ship.currentSP - actualCost.
+
+Set up simultaneous animation: Store start/end positions/orientations. The existing Ship:update lerping can be adapted, potentially needing coordination in combat.lua to update both ships based on their individual start/end points and a shared timer. Rotation should visually tween alongside movement.
+
+State Update: After animations complete (or instantly for now, with animation hooks added later):
+
+Update playerShip.position and enemyShip.position to their final resolved hexes.
+
+Clear plannedMove and plannedRotation for both ships.
+
+Transition gameState.combat.phase to Player Action Planning.
+
+Acceptance Criteria:
+
+Ship orientations are updated based on plannedRotation at the start of the phase (internal state).
+
+A basic collision rule prevents ships from occupying the same hex.
+
+Ships move (visually, eventually) towards their resolved destinations simultaneously.
+
+Correct SP cost is deducted based on the actual maneuver performed.
+
+Ship positions are updated correctly in gameState.combat.
+
+plannedMove and plannedRotation are cleared.
+
+Phase transitions correctly to Action Planning.
+
+Notes: Simultaneous animation can be tricky. Initial implementation might just snap positions/orientations after calculating costs, with visual tweening added later. Collision rules can be basic for now. Depends on Tickets 3.X.1, 3.X.2, 3.X.3.
+
+## Tickets/3-x-5-implement-firing-arcs-logic.md
+ Implement Firing Arcs (Logic & Data)
+
+Description: Define firing arc data for ship classes and implement the logic to check if a target hex is within a ship's firing arc based on its current orientation.
+
+Tasks:
+
+Add firingArcs data to Combat.shipDefinitions. Define arcs relative to the ship's forward direction (orientation 0). Example:
+
+sloop: { forward = true, sides = false, rear = false } (Maybe just forward?)
+
+brigantine: { forward = false, sides = true, rear = false } (Broadsides)
+
+galleon: { forward = true, sides = true, rear = false } (Broadsides + some forward?) - Needs Design Clarification based on kite shape. Let's assume broadsides for now: { forward = false, sides = true, rear = false }.
+
+Implement Combat:getFiringArcHexes(ship): Given a ship object (with position, orientation, class), return a list of absolute hex coordinates {q, r} that fall within its defined firing arc(s) and within a reasonable range (e.g., 5 hexes). This requires mapping relative arc definitions to world space based on orientation.
+
+Implement Combat:isInFiringArc(ship, targetQ, targetR): A simpler check, returns true if the specific targetQ, targetR is within the firing arc calculated by getFiringArcHexes (or a direct geometric calculation).
+
+Acceptance Criteria:
+
+shipDefinitions includes firingArcs for each class.
+
+Combat:getFiringArcHexes correctly calculates the set of hexes within range and arc based on ship orientation.
+
+Combat:isInFiringArc correctly returns true/false for a given target hex.
+
+Notes: This ticket focuses purely on the logic. Visualization comes in 3.X.7. Firing arc definitions might need refinement based on gameplay testing. Needs careful hex math for orientation and relative positions.
+
+## Tickets/3-x-6-adapt-action-planning-and-resolution-for-firing-arcs.md
+Adapt Action Planning & Resolution for Arcs
+
+Description: Modify the existing Action Planning and Resolution phases to incorporate firing arc checks after the Maneuver Resolution phase.
+
+Tasks:
+
+Modify the Player Action Planning phase logic:
+
+When the player selects the "Fire Cannons" action from the contextual menu (Ticket AdHoc/UI_Task_3), before showing the Confirmation Window (Ticket AdHoc/UI_Task_4):
+
+The UI should now require selecting a target hex (likely the enemy ship's hex).
+
+Check if the target hex is within the player ship's firing arc using Combat:isInFiringArc based on the ship's orientation after the maneuver resolution.
+
+If not in arc, disallow targeting or show feedback ("Target not in arc").
+
+If in arc, proceed to the Confirmation Window.
+
+Modify Combat:fireCannons: This function now implicitly assumes the target is valid (checked during planning). No changes needed here unless damage/effects depend on which arc was used (future enhancement).
+
+Modify Enemy AI Action Planning (chooseEnemyAction or similar):
+
+When planning "Fire Cannons", the AI must check if the player ship is within its firing arc based on its orientation after its planned maneuver.
+
+If the player is not in arc, the AI should choose a different action (e.g., Evade, Repair, or potentially prioritize rotation next turn).
+
+Acceptance Criteria:
+
+Player can only target enemy ships within their firing arc during the Action Planning phase.
+
+The Confirmation Window for "Fire Cannons" only appears if a valid target in arc is selected.
+
+Enemy AI only attempts to fire if the player is within its firing arc after its maneuver.
+
+Notes: This integrates the new positioning mechanics directly into action constraints. Depends on 3.X.4 (Maneuver Resolution) and 3.X.5 (Firing Arc Logic).
+
+## Tickets/3-x-7-visualize-firing-arcs-and-planned-maneuvers.md
+ UI - Visualize Firing Arcs & Planned Maneuvers
+
+Description: Implement visual feedback for firing arcs during action planning and potentially visualize the planned maneuver during the maneuver planning phase.
+
+Tasks:
+
+Firing Arc Visualization:
+
+Create Combat:drawFiringArcs(ship) function.
+
+When the player selects "Fire Cannons" during the Action Planning phase, call this function.
+
+It should visually highlight the hexes within the ship's firing arc (using getFiringArcHexes from 3.X.5). Use a distinct color or overlay.
+
+(Optional but Recommended) Planned Maneuver Visualization:
+
+During the Player Maneuver Planning phase (Ticket 3.X.2), draw a visual representation of the planned move:
+
+A line or series of dots from the current position to the selected destination hex.
+
+An indicator (e.g., a ghosted ship sprite or an arrow) showing the planned final orientation at the destination hex.
+
+This visualization should update dynamically as the player adjusts their planned move/rotation.
+
+Acceptance Criteria:
+
+When planning to fire cannons, the valid firing arc hexes are clearly highlighted on the grid.
+
+(If implemented) During maneuver planning, the player sees a clear preview of their intended path and final orientation.
+
+Visualizations are clear and readable within the low-res style.
+
+Notes: Arc visualization is crucial for usability. Planned maneuver visualization helps players understand their choices before committing SP. Depends on 3.X.2 and 3.X.5. Requires careful attention to visual clarity (Known Weakness!).
+
+## Tickets/3-x-8-adapt-core-ui-and-enemy-turn-visualization.md
+Adapt Core UI & Enemy Turn Visualization
+
+Description: Ensure the existing minimal HUD, contextual windows, and result overlays function correctly with the new SP system and turn structure. Streamline enemy turn visuals for the new phases.
+
+Tasks:
+
+Update Combat:drawMinimalPlayerStatus to include the currentSP / maxSP display.
+
+Verify that the Ship Info Window (Task UI_Task_2), Action Menu (UI_Task_3), Confirmation Window (UI_Task_4), and Result Overlay (UI_Task_5) still function correctly within the new phase structure. Adjust triggers if necessary.
+
+Refine Combat:processEnemyTurn visualization:
+
+Do not show AI planning details.
+
+During Maneuver Resolution, show the enemy ship moving/rotating simultaneously with the player.
+
+During Action Resolution, use the Result Overlay (Task UI_Task_5) to show the outcome of the enemy's action immediately.
+
+Acceptance Criteria:
+
+Player HUD correctly displays SP.
+
+Existing contextual UI elements (info window, menus, overlays) work as intended in the new turn structure.
+
+Enemy turns resolve visually showing simultaneous movement and clear action results without unnecessary intermediate steps.
+
+Notes: Primarily integration and refinement. Depends on most other 3.X tickets.
+
+## Tickets/AdHoc/UI_Task_1_MinimalHUD.md
+ Core Tasks:
+
+Task: Implement Minimalist Core Combat HUD
+
+Goal: Redesign the always-on-screen UI to show only the absolute essentials, freeing up screen real estate.
+
+Implementation:
+
+Modify Combat:drawUI.
+
+Keep:
+
+Top Bar: Turn Indicator (Player/Enemy), Phase Indicator (Move/Action), Turn Count. (Keep this compact).
+
+Player Ship Status (Minimal): Small corner display (e.g., bottom-left) showing only current HP/Max HP and current CP/Max CP. Use icons if possible.
+
+Enemy Ship Status (Minimal): Small corner display (e.g., top-right or bottom-right) showing only current HP/Max HP.
+
+Remove (from always-on display):
+
+Static sidebars with full ship details.
+
+Static action button bar at the bottom.
+
+Static action feedback panel.
+
+Acceptance Criteria:
+
+The combat screen has significantly more open space.
+
+Only essential turn/phase info and minimal player/enemy HP/CP are constantly visible.
+
+Static sidebars and action/feedback panels are removed.
+
+## Tickets/AdHoc/UI_Task_2_ShipInfoWindow.md
+ Task: Create Contextual Ship Info Display
+
+Goal: Allow players to view detailed ship stats on demand, replacing static sidebars.
+
+Implementation:
+
+Modify Combat:mousemoved to detect hovering over a hex containing any part of a ship (player or enemy).
+
+Create a new function Combat:drawShipInfoWindow(shipData) that draws a temporary, clean pop-up window (similar to unit stat screens in Fire Emblem).
+
+This window should display: Ship Name, Class, Current/Max HP, Current/Max CP (if player), Speed, Firepower Dice, Evade Score (if > 0), any active Modifiers affecting the ship.
+
+In Combat:draw, call drawShipInfoWindow for the hovered ship. The window should appear near the hovered ship but avoid obscuring critical areas.
+
+Acceptance Criteria:
+
+Hovering over any ship (player or enemy) displays a detailed info window for that ship.
+
+The info window disappears when the mouse moves off the ship.
+
+The main combat HUD remains minimal.
+
+## Tickets/AdHoc/UI_Task_3_ActionMenu.md
+ Task: Implement Contextual Action Selection Menu
+
+Goal: Replace the static action button bar with a dynamic menu that appears when the player intends to act.
+
+Implementation:
+
+Modify Combat:mousepressed for the player's turn:
+
+Clicking the player ship during the Movement Phase still selects it for movement (shows valid move hexes).
+
+Clicking the player ship during the Action Phase (or maybe adding a dedicated "Actions" button to the minimal HUD or Ship Info Window) opens a small, contextual action menu near the player ship.
+
+Create Combat:drawActionMenu(): Renders a simple menu listing available actions (Fire Cannons, Evade, Repair, End Turn).
+
+Grey out actions the player cannot afford (based on CP).
+
+Update Combat:mousepressed to handle clicks within this action menu. Selecting an action transitions to the "Confirmation" step (Task 4).
+
+Acceptance Criteria:
+
+The static action button bar is gone.
+
+Clicking the player ship in the Action Phase brings up a contextual menu of actions.
+
+Unaffordable actions are clearly indicated (greyed out).
+
+Selecting an available action proceeds to the next step.
+
+## Tickets/AdHoc/UI_Task_4_ConfirmationWindow.md
+ Task: Develop Pre-Action Confirmation Window (Dice Stakes)
+
+Goal: Show the player the exact dice roll setup before they commit an action, clearly displaying stakes.
+
+Implementation:
+
+Introduce a new combat state, e.g., gameState.combat.phase = "confirmingAction", storing which action is being confirmed.
+
+When an action (Fire, Evade, Repair) is selected from the menu (Task 3), enter this state.
+
+Create Combat:drawConfirmationWindow(actionData):
+
+Draws a pop-up window.
+
+Displays: Action Name ("Fire Cannons"), Target (if applicable, e.g., "Enemy Sloop"), Base Dice, List of Modifiers (e.g., "+1 Point Blank", "-1 Target Evading"), Final Dice Pool (e.g., "Rolling 3d6").
+
+Briefly indicate potential outcomes (e.g., "6=Success, 4-5=Partial").
+
+Show the CP Cost.
+
+Provide clear "Confirm" and "Cancel" buttons within this window.
+
+Modify Combat:mousepressed to handle clicks on "Confirm" or "Cancel". Cancel returns to the Action Phase/Menu. Confirm proceeds to execute the action (Task 5).
+
+Acceptance Criteria:
+
+Selecting an action from the menu displays a confirmation window.
+
+The window clearly shows the number of dice to be rolled, accounting for all modifiers.
+
+The player must explicitly Confirm or Cancel the action.
+
+CP cost is visible.
+
+## Tickets/AdHoc/UI_Task_5_ResultOverlay.md
+ Task: Implement Dynamic Action Result Feedback
+
+Goal: Replace the static feedback panel with a clear, temporary overlay showing the results of the confirmed action.
+
+Implementation:
+
+When "Confirm" is clicked (Task 4):
+
+Perform the action logic (deduct CP, roll dice using diceSystem:roll, apply effects). Store the results (dice values, outcome, damage/repair/evade score) potentially in gameState.combat.actionResult as before.
+
+Enter a brief new phase like gameState.combat.phase = "displayingResult".
+
+Create Combat:drawActionResultOverlay():
+
+Draws a prominent, temporary overlay (possibly centered or near the action's target).
+
+Visually displays the dice roll (using diceSystem:drawWithHighlight).
+
+Clearly shows the result text ("Critical Success!", "Partial Success", "Failure").
+
+Shows the concrete effect (e.g., "-10 HP!", "+2 Evade Score!", "Repaired 5 HP!").
+
+This overlay should either fade out after a short duration (e.g., 1.5-2 seconds) or require a click to dismiss, returning to the Action Phase.
+
+Acceptance Criteria:
+
+After confirming an action, the dice roll and results are shown clearly and dynamically.
+
+The feedback is temporary and doesn't permanently clutter the screen.
+
+The player understands the outcome of their action.
+
+The game returns to the appropriate state (Action Phase or End Turn if CP is depleted/player chooses).
+
+## Tickets/AdHoc/UI_Task_6_EnemyTurnVis.md
+ Task: Streamline Enemy Turn Visuals
+
+Goal: Make enemy turns resolve quickly and clearly without overwhelming the player with unnecessary AI decision detail.
+
+Implementation:
+
+In Combat:processEnemyTurn: Keep the AI logic, but modify the display.
+
+When the enemy acts, don't show a confirmation window for them.
+
+Directly trigger the Combat:drawActionResultOverlay (Task 5) showing the result of the enemy action (e.g., "Enemy Fires Cannons!", dice roll, "Success!", "-10 HP!").
+
+Maybe add a very brief preceding indicator like a small "!" icon over the acting enemy ship.
+
+Ensure enemy turn actions resolve visually without requiring player clicks to advance unless absolutely necessary (e.g., end of their entire turn).
+
+Acceptance Criteria:
+
+Enemy turns are visually less intrusive than player turns.
+
+The results of enemy actions are clearly communicated via the feedback overlay.
+
+The game flow during the enemy turn feels reasonably quick.
+
+General Guidelines for the Team:
+
+Iteration: This UI overhaul may require iteration. Encourage the team to build simple versions first and then refine based on usability testing (even just internal team testing).
+
+Visual Consistency: Ensure new UI elements (windows, menus, overlays) match the established retro pixel art style. Placeholder art is acceptable initially, but the layout and flow are key. New art assets might be required.
+
+Testing Resolution: Test constantly at the target 800x600 resolution to ensure readability. What looks fine on a large monitor might be unreadable when scaled down. Use pixel-perfect fonts.
+
+Input Handling: Pay close attention to mouse clicks. Ensure clicks are only registered by the topmost relevant UI element (e.g., clicking "Confirm" shouldn't also register as clicking on the hex grid underneath). Manage game states (gameState.combat.phase) carefully to control input.
+
+Code Structure: Keep the new drawing functions (drawShipInfoWindow, drawActionMenu, etc.) organised within combat.lua or potentially a new src/ui/combatUI.lua module if combat.lua becomes too large.
 
