@@ -181,7 +181,7 @@ function Map:load(gameState)
     end
     
     -- Font for tooltips
-    self.tooltipFont = love.graphics.newFont(14)
+    self.tooltipFont = gameState.fonts.small
  end
 
 -- Update map state
@@ -244,6 +244,7 @@ function Map:draw(gameState)
         
         -- Draw zone name
         love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(gameState.fonts.small)
         local textWidth = love.graphics.getFont():getWidth(zone.name)
         love.graphics.print(zone.name, x - textWidth/2, y - 7)
     end
@@ -316,7 +317,7 @@ function Map:draw(gameState)
         
         -- Tooltip text
         love.graphics.setColor(1, 1, 1, 1)
-        love.graphics.setFont(self.tooltipFont)
+        love.graphics.setFont(gameState.fonts.small)
         love.graphics.printf(tooltipText, tooltipX + 10, tooltipY + 10, tooltipWidth - 20, "left")
     end
     
@@ -365,6 +366,7 @@ function Map:draw(gameState)
     
     -- Display instructions
     love.graphics.setColor(1, 1, 1, 0.7)
+    love.graphics.setFont(gameState.fonts.small)
     
     local instructionText = "Hover over zones to see information\nClick adjacent zones to sail there"
     if gameState.ship.currentZone and not gameState.settings.moored then
@@ -374,6 +376,9 @@ function Map:draw(gameState)
     end
     
     love.graphics.printf(instructionText, 10, self.height - 70, 300, "left")
+    
+    -- Reset to default font
+    love.graphics.setFont(gameState.fonts.default)
 end
 
 -- Handle mouse movement

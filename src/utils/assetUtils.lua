@@ -3,16 +3,27 @@
 
 local AssetUtils = {}
 
+-- Asset types
+AssetUtils.ASSET_TYPE = {
+    SHIP = "ship",
+    MAP = "map",
+    UI = "ui",
+    DICE = "dice",
+    FONT = "font"
+}
+
 -- Default placeholder images for different asset types
 local DEFAULT_PLACEHOLDERS = {
     ship = {r = 0.2, g = 0.5, b = 0.8}, -- Blue rectangle for ships
     map = {r = 0.1, g = 0.3, b = 0.2},  -- Green rectangle for map elements
     ui = {r = 0.4, g = 0.4, b = 0.4},   -- Gray rectangle for UI elements
-    dice = {r = 0.7, g = 0.7, b = 0.2}  -- Yellow rectangle for dice
+    dice = {r = 0.7, g = 0.7, b = 0.2}, -- Yellow rectangle for dice
+    font = {r = 0.5, g = 0.3, b = 0.6}  -- Purple for fonts
 }
 
--- Table to store loaded assets for reference
+-- Tables to store loaded assets for reference
 AssetUtils.loadedAssets = {}
+AssetUtils.loadedFonts = {}
 
 -- Load an image with error handling
 -- @param filePath - The path to the image file
@@ -46,6 +57,46 @@ function AssetUtils.loadImage(filePath, assetType)
     else
         -- Print detailed error message
         print("ERROR: Failed to load asset: " .. filePath)
+        print("Reason: " .. tostring(result))
+        return nil
+    end
+end
+
+-- Load a font with error handling
+-- @param filePath - The path to the font file
+-- @param size - The font size (default: 16)
+-- @return The loaded font or nil if loading failed
+function AssetUtils.loadFont(filePath, size)
+    -- Validate inputs
+    if not filePath then
+        print("ERROR: No file path provided to AssetUtils.loadFont")
+        return nil
+    end
+    
+    size = size or 16
+    
+    -- Create cache key (filepath + size)
+    local cacheKey = filePath .. "_" .. size
+    
+    -- Check if we've already loaded this font at this size
+    if AssetUtils.loadedFonts[cacheKey] then
+        return AssetUtils.loadedFonts[cacheKey]
+    end
+    
+    -- Try to load the font
+    local success, result = pcall(function() 
+        return love.graphics.newFont(filePath, size)
+    end)
+    
+    -- Handle the result
+    if success then
+        -- Store the loaded font for future reference
+        AssetUtils.loadedFonts[cacheKey] = result
+        print("Successfully loaded font: " .. filePath .. " at size " .. size)
+        return result
+    else
+        -- Print detailed error message
+        print("ERROR: Failed to load font: " .. filePath)
         print("Reason: " .. tostring(result))
         return nil
     end

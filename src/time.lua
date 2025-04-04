@@ -56,6 +56,7 @@ end
 function TimeSystem:draw(gameState)
     -- Time information in top-right corner
     love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.setFont(gameState.fonts.default)
     local timeString = self:getTimeString(gameState)
     local textWidth = love.graphics.getFont():getWidth(timeString)
     love.graphics.print(timeString, 800 - textWidth - 10, 10)
@@ -120,12 +121,14 @@ function TimeSystem:draw(gameState)
         
         -- Game over message
         love.graphics.setColor(1, 0.3, 0.3, 1)
+        love.graphics.setFont(gameState.fonts.large)
         local message = "Game Over - The Earthquake has struck Port Royal!"
         local msgWidth = love.graphics.getFont():getWidth(message)
         love.graphics.print(message, 400 - msgWidth/2, 280)
         
         -- Instructions to restart
         love.graphics.setColor(1, 1, 1, 0.8)
+        love.graphics.setFont(gameState.fonts.default)
         local restartMsg = "Press 'R' to restart the game"
         local restartWidth = love.graphics.getFont():getWidth(restartMsg)
         love.graphics.print(restartMsg, 400 - restartWidth/2, 320)

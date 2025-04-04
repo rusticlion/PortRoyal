@@ -12,8 +12,69 @@ function love.load()
     -- Load game assets and initialize states
     love.graphics.setDefaultFilter("nearest", "nearest") -- For pixel art
     
-    -- Create assets directory if it doesn't exist
+    -- Create required directories if they don't exist
     love.filesystem.createDirectory("assets")
+    love.filesystem.createDirectory("assets/fonts")
+    
+    -- Check if font file exists in save directory, if not copy it
+    local fontInfo = love.filesystem.getInfo("fonts/alagard.ttf")
+    if not fontInfo then
+        -- Create fonts directory in save directory
+        love.filesystem.createDirectory("fonts")
+        
+        -- Copy font from external directory to save directory
+        local externalFontPath = "/Users/russell/PortRoyal/assets/fonts/alagard.ttf"
+        local file = io.open(externalFontPath, "rb")
+        if file then
+            local fontData = file:read("*all")
+            file:close()
+            love.filesystem.write("fonts/alagard.ttf", fontData)
+            print("Copied font to save directory")
+        else
+            print("Could not open external font file")
+        end
+    end
+    
+    -- Load Alagard font using AssetUtils
+    gameState.fonts = {}
+    
+    -- List of font paths to try, in order of preference
+    local fontPaths = {
+        "assets/fonts/alagard.ttf",
+        "fonts/alagard.ttf", 
+        "/Users/russell/PortRoyal/assets/fonts/alagard.ttf"
+    }
+    
+    -- Try each font path until one works
+    local defaultFont = nil
+    
+    for _, path in ipairs(fontPaths) do
+        defaultFont = AssetUtils.loadFont(path, 16)
+        if defaultFont then
+            print("Successfully loaded font from: " .. path)
+            break
+        end
+    end
+    
+    -- Set up font sizes
+    if defaultFont then
+        -- We found and loaded the font
+        local fontPath = fontPaths[1] -- Use the first path that worked
+        gameState.fonts.default = defaultFont
+        gameState.fonts.title = AssetUtils.loadFont(fontPath, 24)
+        gameState.fonts.small = AssetUtils.loadFont(fontPath, 12)
+        gameState.fonts.large = AssetUtils.loadFont(fontPath, 32)
+    else
+        -- Fall back to system font
+        print("Could not load Alagard font, using default system font")
+        gameState.fonts.default = love.graphics.newFont(16)
+        gameState.fonts.title = love.graphics.newFont(24) 
+        gameState.fonts.small = love.graphics.newFont(12)
+        gameState.fonts.large = love.graphics.newFont(32)
+    end
+    
+    -- Set default font
+    love.graphics.setFont(gameState.fonts.default)
     
     -- Initialize game state - central repository for all game data
     gameState:init()

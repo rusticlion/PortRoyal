@@ -1,4 +1,4 @@
-Pirate’s Wager: Blood for Gold – Comprehensive Design Document
+Pirate's Wager: Blood for Gold – Comprehensive Design Document
 1. Game Concept Overview
 Setting: A pixel-art pirate adventure set in the 17th-century Caribbean, 
 centered on Port Royal, culminating in the historical 1692 earthquake as a 
@@ -51,22 +51,29 @@ context:
 1-3: Failure (e.g., miss or mishap).
 Chase Mechanics: If a ship exits the grid, a dice roll decides escape or 
 pursuit.
+Boarding Combat:
+*   Initiated via "Board" action in naval combat.
+*   Transitions to side-view, turn-based combat screen with party formation (Front/Back ranks).
+*   Crew use `boardingActions` based on their Role and Competencies (MeleeDice, RangedDice, InfluenceDice).
+*   Resolution follows FitD principles (Position/Effect -> Dice Pool -> Roll -> Outcome/Consequences). Consequences include HP damage, gaining Conditions, tactical shifts. **(Updated Boarding summary)**
+
 3.2 In Port Royal
-Investments (Claims):
-Stake resources (gold, items, crew) and time (1-3 weeks) to claim/upgrade 
-properties (e.g., taverns, shipyards).
-Dice Rolls: Determine outcomes:
-Success: Full benefits (e.g., income, perks).
-Partial Success: Benefits with complications (e.g., rival attention).
-Failure: Lose some resources, gain a minor perk.
-Crew Management: Recruit, train, and manage crew with unique roles and 
-stats.
-Faction Relationships: Build or strain ties with factions (e.g., pirates, 
-navy) via actions.
-Earthquake Prep Options:
-Fortify Investments: Quake-proof properties.
-Stockpile Supplies: Hoard resources for recovery.
-Evacuation Plans: Prepare to flee with loot and crew.
+*   **Port Phase Structure:** Players manage limited time (weeks) by choosing between repeatable **Activities** (lower risk/reward, immediate outcomes like trade, rumors, recruiting, reducing Heat) and attempting strategic **Claims** (higher risk/reward, persistent benefits/complications like establishing networks, securing assets, gaining influence). **(Added Activity/Claim distinction)**
+*   **Claims (Investments):**
+    *   Stake resources (Gold, Crew Time, Items, Rep) to establish/upgrade persistent assets (Tavern Influence, Smuggling Ring, Dock Control).
+    *   Dice Rolls (FitD): Determine outcome (Crit/Success/Partial/Failure). Modifiers from Crew Competencies, Reputation, Heat, Pirate Code.
+    *   Success: Full benefits (passive income, new options, Tier increase).
+    *   Partial Success: Benefits with complications (rival attention, Faction Heat, extra cost).
+    *   Failure: Lose some resources, gain minor insight or temporary condition ("Fail Forward").
+*   **Activities:**
+    *   Repeatable actions (Gamble, Gather Rumors, Recruit, Smuggle Cargo, Lay Low, Repair).
+    *   Lower cost (Gold, 1 week time).
+    *   Dice Rolls (FitD): Determine immediate outcome. Consequences usually temporary setbacks or minor Heat gain.
+*   Crew Management: Recruit, train, manage crew (see 5.1). Assign crew to Claims (takes them off ship). Manage crew Conditions gained from hardship.
+*   Faction Relationships: Build or strain ties (Pirates, Merchants, Navy, Locals) via actions at sea and in port. Influences Claim/Activity success, prices, available opportunities. (See 5.3).
+*   **Pirate Code:** Make defining choices during events, shaping your Captaincy style and affecting Crew/Factions (See 5.6).
+*   Earthquake Prep Options: Undertake special Claims/Activities late-game (Fortify Investments, Stockpile Supplies, Evacuation Plans).
+
 4. Ship Classes
 Players can command three distinct ship classes, each with unique 
 characteristics that influence exploration and combat. These classes are 
@@ -88,7 +95,7 @@ Flavor: A sleek, low-profile ship with patched sails, built for stealth
 and speed.
 Customization: Options include adding a harpoon for boarding or extra 
 sails for increased speed.
-4.2 Brigantine (2-Hex Ship) – "The Rogue’s Balance"
+4.2 Brigantine (2-Hex Ship) – "The Rogue's Balance"
 Description: A versatile, mid-sized ship that balances speed and strength. 
 Suitable for a wide range of pirate activities.
 Hex Size and Shape: 2 hexes in a straight line, sleek and narrow.
@@ -136,17 +143,21 @@ Upgrades: Players can enhance speed, firepower, or durability within each
 class to suit their playstyle.
 5. Mechanics Deep Dive
 5.1 Crew System
-Crew Roles: Navigator, Gunner, Surgeon, etc., boosting specific actions (e.g., Navigator reduces travel time, Surgeon adds dice to Repair, Gunner adds dice to Fire Cannons). (Added Gunner effect intent)
-Character Sheet:
-Role: Defines specialty.
-Skill Level: 1-5, adding dice/bonuses to rolls.
-Loyalty: 1-10 (low risks mutiny, high enhances performance).
-Influences: Victories (+1), rum (+2), long voyages (-1/week).
-Health: Hit points; injuries occur in combat.
-Boon/Bane: One positive trait (e.g., “Sharp-Eyed”) and one negative (e.g., 
-“Cursed”).
-Recruitment: Found in taverns or via quests; elite crew require high 
-reputation. Hiring costs gold. (Clarified hiring cost)
+*   Crew Roles: Navigator, Gunner, Surgeon, Swashbuckler, Quartermaster, Carpenter etc. Defines core function and potential unique `boardingActions`.
+*   **Character Sheet:**
+    *   `Role`: Defines specialty.
+    *   **Competencies:** `MeleeDice`, `RangedDice`, `TechnicalDice`, `InfluenceDice` (Base dice pool, e.g., 0-3, for relevant actions).
+    *   `Health`: Max HP. Reaching 0 = Injury/Death status.
+    *   `Conditions`: Temporary negative states affecting stats/actions (e.g., "Injured Arm" -1 MeleeDice, "Shaken" -1 InfluenceDice). Gained via consequences, cleared by Port Activities/time.
+    *   `LoyaltyFactors`: Narrative list of +/- factors influencing behavior (e.g., "Paid well", "Disagrees with Code"). Net sentiment impacts willingness/rolls.
+    *   `Boon/Bane`: One positive/negative trait (e.g., "Sea Legs", "Greedy"). Adds flavor and minor mechanical effects.
+    *   `Experience/Level`: Gain XP, level up to improve Competencies, gain Traits or `boardingActions`.
+    *   `BoardingActions`: List of specific actions usable in boarding combat.
+    *   `Status`: Active, Injured, Disgruntled, Loyal, Captured, Dead.
+    *   `CodeAlignment`: Notes agreement/disagreement with Captain's Pirate Code points.
+*   Recruitment: Found in Taverns (Activity roll?) or via quests. Costs Gold. Check `codeAlignment`?
+*   Advancement: Gain XP, level up via Training Activities or successful missions.
+
 5.2 Item System
 Types:
 Resources: Bulk goods (e.g., rum, timber) tracked numerically.
@@ -155,64 +166,76 @@ Equipment: Gear for crew/ship (e.g., cannons, sails).
 Inventory: Ship hold has 10 slots, expandable in port.
 Staking: Items/crew committed to actions; failure risks partial loss.
 5.3 Reputation System
-Factions: Pirates, Merchants, Navy, Locals.
-Scale: -3 to +3 per faction.
--3: Hated (e.g., barred from ports).
-0: Neutral.
-+3: Revered (e.g., exclusive deals).
-Shifts: Actions (e.g., raiding) adjust rep by 1-2 points.
-Impact: Affects opportunities, crew recruitment, and events.
+*   Factions: Pirates, Merchants, Navy, Locals. Scale: -3 to +3.
+*   Shifts: Actions at sea (raiding, trading) and in port (Claims, Activities, Quests) adjust Rep. Pirate Code choices significantly impact Rep. **(Added Pirate Code link)**
+*   Impact: Affects access, prices, Claim/Activity modifiers & availability, Quest availability, Faction Heat generation. High/Low Rep unlocks unique opportunities/dangers.
+
 5.4 Passage of Time
-Timeline: 72 weeks, with the earthquake striking randomly between weeks 
-60-72.
-At Sea: Zone movement costs time (base 1 week, modified by wind/crew). Major actions like specific exploration events might cost time. Combat itself does not advance the week counter, but initiating it might if tied to an action. (Clarified time costs)
-In Port: Actions take 1-3 weeks (e.g., 1 for basic repairs, 2 for investments, 1 for recruiting). (Confirmed port time costs)
-Hints: NPC rumors and tremors escalate as the quake approaches.
+*   Timeline: 72 weeks...
+*   At Sea: Zone movement costs time... Naval combat itself doesn't consume weeks, but the actions leading to it or resolving it might. Boarding actions occur within the naval combat turn structure. **(Clarified combat time)**
+*   In Port: **Activities** typically cost 1 week. **Claims** cost 1-3+ weeks. Recruiting, Training, Repairing cost time.
+*   Hints: NPC rumors and tremors...
+
 5.5 Economic Systems
-Trade Routes: Buy low, sell high across ports with dynamic pricing.
-Missions: Faction quests (e.g., smuggling for merchants).
-Passive Income: Investments yield steady cash or perks.
-High-Risk Options: Raiding navy convoys offers rare loot (e.g., unique 
-ship parts).
+*   Trade Routes: Buy low, sell high (Market Activity). Prices influenced by Merchant Rep, potentially zone events/supply.
+*   Smuggling: Buy/sell Contraband (Smuggle Activity). Higher risk/reward, uses FitD roll, generates Heat, influenced by Pirate/Local Rep & Navy Heat.
+*   Claim Income: Successful Claims generate passive Gold or Resources over time.
+*   Missions: Faction quests offer rewards (Gold, Items, Rep).
+*   Raiding: Loot from defeated ships (Gold, Cargo, potentially Crew/Items).
+
+**5.6 Pirate Code** **(New Section)**
+*   **Establishing the Code:** Through specific narrative events and dilemmas, player chooses between opposing stances (e.g., Mercy vs No Quarter, Fair Shares vs Captain's Cut, Deception vs Honesty). Choices are recorded in `gameState.pirateCode`.
+*   **Defining Captaincy:** The collection of Code choices shapes the player's reputation and perceived Captaincy style (e.g., Dread Pirate, Honorable Privateer, Cunning Smuggler).
+*   **Impact - Factions:** Code choices heavily influence Faction Reputation gains/losses. Some Factions favor specific codes.
+*   **Impact - Crew:** Crew members react based on their own `codeAlignment` traits, affecting their `loyaltyFactors`. Consistent alignment builds loyalty; contradiction breeds discontent. May affect recruitment options.
+*   **Impact - Gameplay:** Unlocks/blocks specific Claim opportunities, dialogue options, quest solutions, or Activity modifiers. May influence event outcomes.
+
 6. Port Phase Details
-Presentation: One screen per location (e.g., tavern, shipyard) with 
-side-view pixel art and light animations.
-Interactions: Click to access functions; occasional mini-events (e.g., bar 
-fights, rumors).
-Purpose: A streamlined hub for management and prep with flavorful 
-immersion.
+*   Presentation: Side-view screens...
+*   Interactions: Click to access Activities (Tavern, Shipyard, Market) or strategic Claims screen. Occasional mini-events.
+*   Purpose: Hub for managing crew (recruitment, condition recovery), ship (repairs), resources (trade/smuggling), strategy (Claims, Faction management), and reflecting on Pirate Code choices. **(Updated Purpose)**
+
 7. Combat System
-Hex Grid: 10x10 hexes; ships sized 1-4 hexes based on class.
-Turn Structure: Movement Phase (spend move points based on Speed) followed by Action Phase (spend Crew Points). (Aligned with Section 3.1)
-Actions: Core actions (Fire, Evade, Repair) cost CP (1/1/2 respectively). Others TBD. (Aligned with Section 3.1)
-Dice Pools: 1-5 d6s for attacks, evasion, etc., based on ship, crew (e.g., Gunner skill for Fire, Surgeon for Repair), and context. (Added crew skill links)
-Boarding Actions: Side-view crew combat.
+*   **Naval Combat:**
+    *   Hex Grid: 10x10...
+    *   Maneuvering: Simultaneous resolution using SP for Movement + Rotation planning.
+    *   Actions: Planned after maneuvering, executed using CP. Targeting restricted by Firing Arcs.
+    *   Dice Pools (FitD): Based on ship, crew (Competencies), context. Resolve with consequences.
+*   **Boarding Combat:**
+    *   Triggered by 'Board' action.
+    *   Side-view, turn-based, party formation.
+    *   Crew use `boardingActions` tied to their Competencies (MeleeDice, RangedDice etc.).
+    *   **Resolution (FitD):** Determine Position/Effect -> Assemble Dice Pool -> Roll -> Interpret Outcome (Crit/Success/Partial/Failure) -> Apply Effect & Consequences (HP Damage, Conditions, etc.). **(Clarified FitD resolution)**
+
 8. Modular Systems
-Ship Customization: Hulls, sails, cannons with unique stats (e.g., speed, 
-firepower). Each ship class has specific upgrade paths (e.g., sloops can 
-add speed, galleons can add durability).
-Crew Roles and Traits: Combinatorial depth for management.
-Investments: Properties offer stacking perks and interactions.
+*   Ship Customization: Hulls, sails, cannons... Specific upgrades might align with Pirate Code styles. **(Added Code link)**
+*   Crew Roles and Traits: Combinatorial depth based on Competencies, Roles, Traits, Conditions.
+*   Claims: Strategic port assets offering stacking perks and interactions.
+
 9. Narrative and Supernatural Elements
-Cursed Prophecy: A map reveals the earthquake’s curse, tied to a vengeful 
-captain.
-Secret Ending: A challenging path to break the curse and stop the quake.
-Low Fantasy: Rare supernatural elements (e.g., curses, ghost ships) in 
-specific quests/zones.
+*   Cursed Prophecy...
+*   Secret Ending...
+*   Low Fantasy...
+*   **Pirate Code Events:** Key narrative moments will present Code choices.
+
 10. Difficulty and Progression
-Scaling Enemies: Navy patrols grow stronger with your reputation.
-Event Escalation: Storms and pirate hunters intensify over time.
-Win/Loss Conditions:
-Win: Survive the quake with a thriving empire or legendary status.
-Loss: Lose your ship, crew, or fail to prepare.
+*   Scaling Enemies...
+*   Event Escalation...
+*   Advancement via: Ship Upgrades, successful Claims (increasing Tier?), Crew Leveling. **(Added Claims/Tier)**
+*   Win/Loss Conditions...
+
 11. Strategic Paths
-Merchant Focus: Wealth via trade and investments, fortifying the port.
-Combat Focus: Raiding and crew dominance to rule the seas.
-Balanced Approach: Mix raiding and investing for flexibility.
+*   Merchant Focus: Wealth via trade and Claims, possibly aligning Code towards 'Honesty' or 'Fairness' for Merchant rep.
+*   Combat Focus: Raiding, crew dominance, possibly aligning Code towards 'Ruthlessness' or 'Pirate Brotherhood' for Pirate rep.
+*   Balanced Approach: Mix raiding and Claims, navigating Faction demands and Code choices carefully.
+*   **Captaincy Style:** The chosen Pirate Code will heavily influence the available strategies and narrative outcomes. **(Emphasized Code impact)**
+
 12. Project Name
-Working Title: Pirate’s Wager: Blood for Gold
+*   Working Title: Pirate's Wager: Blood for Gold
+
 13. Next Steps
-Mock up a Caribbean zone map to test voyage lengths.
-Define specific random events and triggers.
-Playtest combat for balance and engagement.
-Expand crew boon/bane traits for variety.
+*   Implement UI Clarity / Simultaneous Maneuvering / Firing Arcs sprint.
+*   Implement Port Phase Dynamics / Economy sprint (Claims, Activities, Factions, Trade/Smuggle).
+*   Implement revised Crew System & Boarding Combat sprint.
+*   Define specific Claims, Activities, Code Events, and Traits.
+*   Playtest extensively to balance combat, economy, and FitD consequences.

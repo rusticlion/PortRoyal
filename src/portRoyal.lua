@@ -2,6 +2,7 @@
 -- Currently focused on Port Royal but can be extended to all locations
 
 local AssetUtils = require('utils.assetUtils')
+local fonts = nil
 
 local PortRoyal = {
     -- UI constants
@@ -28,6 +29,9 @@ local PortRoyal = {
 
 -- Initialize Port interface
 function PortRoyal:load(gameState)
+    -- Store reference to fonts
+    fonts = gameState.fonts
+    
     -- Main screen buttons will be generated dynamically based on location
     self.buttons.main = {}
     
@@ -431,7 +435,9 @@ function PortRoyal:draw(gameState)
     if currentScreen == "main" then
         -- Draw title
         love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(fonts.title)
         love.graphics.printf(currentZoneName .. " Harbor", 0, 100, self.width, "center")
+        love.graphics.setFont(fonts.default)
         
         -- Draw ship name and class
         love.graphics.printf("Ship: " .. gameState.ship.name .. " (" .. gameState.ship.class .. ")", 0, 130, self.width, "center")
@@ -482,7 +488,9 @@ function PortRoyal:draw(gameState)
         
         -- Draw title
         love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(fonts.title)
         love.graphics.printf(tavernName, 0, 50, self.width, "center")
+        love.graphics.setFont(fonts.default)
         
         -- If the background image doesn't include text, draw it manually
         if not self.backgrounds.tavern then
@@ -587,7 +595,9 @@ function PortRoyal:draw(gameState)
         
         -- Draw title
         love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(fonts.title)
         love.graphics.printf(shipyardName, 0, 50, self.width, "center")
+        love.graphics.setFont(fonts.default)
         
         -- If the background image doesn't include text, draw it manually
         if not self.backgrounds.shipyard then
@@ -613,7 +623,9 @@ function PortRoyal:draw(gameState)
     elseif currentScreen == "crew" then
         -- Draw title
         love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(fonts.title)
         love.graphics.printf("Crew Management", 0, 70, self.width, "center")
+        love.graphics.setFont(fonts.default)
         
         -- Draw crew info
         love.graphics.setColor(0.7, 0.85, 1, 1)
@@ -677,7 +689,9 @@ function PortRoyal:draw(gameState)
     elseif currentScreen == "inventory" then
         -- Draw title
         love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(fonts.title)
         love.graphics.printf("Inventory", 0, 70, self.width, "center")
+        love.graphics.setFont(fonts.default)
         
         -- Draw resources section
         love.graphics.setColor(1, 1, 1, 1)
@@ -834,6 +848,7 @@ function PortRoyal:drawButtons(screen)
         
         -- Draw button text
         love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(fonts.default)
         local font = love.graphics.getFont()
         local textWidth = font:getWidth(button.text)
         local textHeight = font:getHeight()
