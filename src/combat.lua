@@ -497,9 +497,18 @@ function Combat:drawHexes(battle, showDebug)
         path = self:calculatePath(startQ, startR, endQ, endR)
     end
 
-    -- Draw all hexes
-    for q = 0, self.GRID_SIZE - 1 do
-        for r = 0, self.GRID_SIZE - 1 do
+    -- Draw all hexes with an extra cell on even rows for symmetry
+    for r = 0, self.GRID_SIZE - 1 do
+        -- Determine row width - add one extra cell for even rows
+        local rowWidth = self.GRID_SIZE
+        if r % 2 == 0 then 
+            rowWidth = rowWidth + 1
+        end
+        
+        -- Calculate starting q to center the row
+        local startQ = 0
+        
+        for q = startQ, startQ + rowWidth - 1 do
             local x, y = self:hexToScreen(q, r)
             
             -- Determine if this hex is part of the planned path
@@ -974,7 +983,7 @@ function Combat:getHexFromScreen(x, y)
     local hexWidth = size * math.sqrt(3)
     
     -- Calculate grid dimensions in hexes and pixels
-    local gridCols = self.GRID_SIZE
+    local gridCols = self.GRID_SIZE + 0.5  -- Add 0.5 to account for odd row extensions
     local gridRows = self.GRID_SIZE
     
     -- Calculate the total width and height of the hex grid
@@ -1012,12 +1021,19 @@ function Combat:getHexFromScreen(x, y)
     local rx, ry, rz = self:roundCube(cx, cy, cz)
     local roundedQ, roundedR = self:cubeToAxial(rx, ry, rz)
     
-    -- Check if the resulting hex is within the grid bounds
-    if roundedQ >= 0 and roundedQ < self.GRID_SIZE and roundedR >= 0 and roundedR < self.GRID_SIZE then
-        return {roundedQ, roundedR}
-    else
-        return nil
+    -- Check if the resulting hex is within the grid bounds, accounting for even rows having an extra cell
+    if roundedQ >= 0 and roundedR >= 0 and roundedR < self.GRID_SIZE then
+        -- Check horizontal bounds based on row
+        local maxQ = self.GRID_SIZE
+        if roundedR % 2 == 0 then
+            maxQ = self.GRID_SIZE + 1 -- Extra cell on even rows
+        end
+        
+        if roundedQ < maxQ then
+            return {roundedQ, roundedR}
+        end
     end
+    return nil
 end
 
 -- Helper function for hex coordinate conversion - converts axial (q,r) to cube (x,y,z)
@@ -1308,18 +1324,31 @@ function Combat:initBattle(gameState, enemyShipClass)
     return battle
 end
 
--- Create an empty hex grid
+-- Create an empty hex grid with extra cells on odd rows for symmetry
 function Combat:createEmptyGrid()
     local grid = {}
-    for q = 0, self.GRID_SIZE - 1 do
+    
+    -- Initialize grid with an extra cell on odd rows
+    for q = 0, self.GRID_SIZE + 1 do -- +1 to ensure we have space for the extra cells
         grid[q] = {}
         for r = 0, self.GRID_SIZE - 1 do
-            grid[q][r] = {
-                content = "empty",
-                isPlayerShip = false,
-                isEnemyShip = false,
-                ship = nil
-            }
+            -- Determine if this cell exists in our odd-row-extended grid
+            local validCell = true
+            
+            -- Skip cells that are beyond the row width
+            if (r % 2 == 1 and q >= self.GRID_SIZE) or 
+               (r % 2 == 0 and q >= self.GRID_SIZE + 1) then
+                validCell = false
+            end
+            
+            if validCell then
+                grid[q][r] = {
+                    content = "empty",
+                    isPlayerShip = false,
+                    isEnemyShip = false,
+                    ship = nil
+                }
+            end
         end
     end
     return grid
@@ -1444,7 +1473,7 @@ function Combat:hexToScreen(q, r)
     local hexWidth = size * math.sqrt(3)
     
     -- Calculate grid dimensions in hexes and pixels
-    local gridCols = self.GRID_SIZE
+    local gridCols = self.GRID_SIZE + 0.5  -- Add 0.5 to account for odd row extensions
     local gridRows = self.GRID_SIZE
     
     -- Calculate the total width and height of the hex grid
@@ -1473,7 +1502,7 @@ function Combat:drawGridArea()
     local hexWidth = size * math.sqrt(3)
     
     -- Calculate grid dimensions in hexes and pixels
-    local gridCols = self.GRID_SIZE
+    local gridCols = self.GRID_SIZE + 0.5  -- Add 0.5 to account for odd row extensions
     local gridRows = self.GRID_SIZE
     
     -- Calculate the total width and height of the hex grid
