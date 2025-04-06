@@ -19,6 +19,20 @@ local Combat = {
     rotationButtons = nil, -- UI button regions for rotation
     confirmManeuverButton = nil, -- UI button region for confirm
     
+    -- Dice animation state
+    diceModule = nil,      -- Reference to the dice module
+    dicePreview = {        -- Dice animation preview state
+        active = false,    -- Is preview active?
+        timer = 0,         -- Animation timer
+        dicePool = 0,      -- Number of dice in the pool
+        results = {},      -- Current animation dice results
+        finalResults = {}, -- Final dice results when player confirms
+        outcome = nil,     -- Outcome when player confirms
+        speed = 0.12,      -- Time between dice changes (seconds)
+        finalizing = false,-- Whether we're finalizing the roll (after confirm)
+        finalized = false  -- Whether dice have settled and are showing final result
+    },
+    
     -- Ship definitions
     shipDefinitions = {
         sloop = {
@@ -510,7 +524,25 @@ function Combat:mousepressed(x, y, button, gameState)
             for buttonName, button in pairs(self.confirmationButtons) do
                 if self:isPointInRect(x, y, button) then
                     if buttonName == "confirm" then
-                        -- Execute the confirmed action
+                        -- First click: Mark dice as finalizing (start the roll)
+                        if self.dicePreview.active and not self.dicePreview.finalizing and not self.dicePreview.finalized then
+                            self.dicePreview.finalizing = true
+                            -- No action execution yet, just start finalizing animation
+                            return true
+                        end
+                        
+                        -- Second click: After dice have finalized, proceed with the action
+                        if self.dicePreview.active and self.dicePreview.finalized then
+                            -- Now execute the action with the finalized dice results
+                            battle.pendingActionTimer = 0.2  -- Short delay before action
+                            battle.pendingAction = battle.confirmingAction
+                            -- Reset dice state for the next action
+                            self.dicePreview.active = false
+                            self.dicePreview.finalized = false
+                            return true
+                        end
+                        
+                        -- If dice aren't active or for some other case, execute the action
                         if battle.confirmingAction == "fireCannons" then
                             if battle.targetHex then
                                 -- Execute fire cannons action with stored target
@@ -541,6 +573,8 @@ function Combat:mousepressed(x, y, button, gameState)
                         battle.confirmingAction = nil
                         battle.targetHex = nil
                         battle.actionInProgress = nil
+                        -- Reset dice preview
+                        self.dicePreview.active = false
                         return true
                     end
                 end
@@ -742,57 +776,75 @@ function Combat:advanceToNextPhase(battle)
         battle.phase = "playerActionPlanning"
         
     elseif battle.phase == "playerActionPlanning" then
-        -- After player plans actions, advance to action resolution
-        battle.phase = "actionResolution"
+        -- When using End Turn button, we just transition to displayingResult with no action
+        -- The displayingResult phase will handle checking for enemy actions
+        battle.phase = "displayingResult"
+        battle.actionResult = nil
+        battle.displayingResultDuration = 0.5  -- Start with a small delay to show "End Turn" 
+        battle.showContinuePrompt = true
         
     elseif battle.phase == "actionResolution" then
-        -- After player action resolves, check if enemy has a planned action
-        if battle.enemyShip.plannedAction and battle.enemyShip.plannedAction ~= "none" then
-            -- Execute enemy's planned action
-            print("Executing enemy planned action: " .. battle.enemyShip.plannedAction)
-            
-            if battle.enemyShip.plannedAction == "fireCannons" then
-                -- Check if player is still in enemy firing arc (position may have changed)
-                local playerQ, playerR = battle.playerShip.position[1], battle.playerShip.position[2]
-                
-                -- Check if player is in firing arc
-                if self:isInFiringArc(battle, battle.enemyShip, playerQ, playerR) then
-                    -- Fire cannons at player ship
-                    self:fireCannons(battle, battle.enemyShip, playerQ, playerR)
-                else
-                    print("Player no longer in enemy firing arc, skipping enemy attack")
-                    -- Enemy chose fireCannons but player is no longer in arc - action fails
-                    battle.actionResult = {
-                        action = "fireCannons",
-                        ship = "enemy",
-                        failed = true,
-                        failReason = "Target not in firing arc"
-                    }
-                end
-            elseif battle.enemyShip.plannedAction == "evade" then
-                -- Execute enemy evade action
-                self:performEvade(battle, battle.enemyShip)
-            elseif battle.enemyShip.plannedAction == "repair" then
-                -- Execute enemy repair action
-                self:performRepair(battle, battle.enemyShip)
-            end
-            
-            -- Reset enemy's planned action
-            battle.enemyShip.plannedAction = nil
-        end
-        
-        -- After action resolution, show results
+        -- This phase only happens for player-initiated actions (when player uses CP)
+        -- After a player action resolves, show results
         battle.phase = "displayingResult"
         
     elseif battle.phase == "displayingResult" then
         -- Clear action feedback
         battle.actionFeedback = nil
         
-        -- After player dismisses results, start a new turn
-        self:startNewTurn(battle)
-        
-        -- Process enemy planning for the new turn
-        self:processEnemyPlanning(battle)
+        -- Check whose action result we're displaying
+        if battle.actionResult and battle.actionResult.ship == "enemy" then
+            -- After enemy action, start a new turn
+            self:startNewTurn(battle)
+            
+            -- Process enemy planning for the new turn
+            self:processEnemyPlanning(battle)
+        else
+            -- After player action, check if enemy has actions to take
+            if battle.enemyShip.plannedAction and battle.enemyShip.plannedAction ~= "none" then
+                -- Execute enemy's planned action
+                print("Executing enemy planned action: " .. battle.enemyShip.plannedAction)
+                
+                if battle.enemyShip.plannedAction == "fireCannons" then
+                    -- Check if player is still in enemy firing arc (position may have changed)
+                    local playerQ, playerR = battle.playerShip.position[1], battle.playerShip.position[2]
+                    
+                    -- Check if player is in firing arc
+                    if self:isInFiringArc(battle, battle.enemyShip, playerQ, playerR) then
+                        -- Fire cannons at player ship
+                        self:fireCannons(battle, battle.enemyShip, playerQ, playerR)
+                    else
+                        print("Player no longer in enemy firing arc, skipping enemy attack")
+                        -- Enemy chose fireCannons but player is no longer in arc - action fails
+                        battle.actionResult = {
+                            action = "fireCannons",
+                            ship = "enemy",
+                            failed = true,
+                            failReason = "Target not in firing arc"
+                        }
+                    end
+                elseif battle.enemyShip.plannedAction == "evade" then
+                    -- Execute enemy evade action
+                    self:performEvade(battle, battle.enemyShip)
+                elseif battle.enemyShip.plannedAction == "repair" then
+                    -- Execute enemy repair action
+                    self:performRepair(battle, battle.enemyShip)
+                end
+                
+                -- Reset enemy's planned action
+                battle.enemyShip.plannedAction = nil
+                
+                -- Reset duration so we start the timer again for the enemy action result
+                battle.displayingResultDuration = 0
+                battle.showContinuePrompt = false
+            else
+                -- If no enemy action, start a new turn
+                self:startNewTurn(battle)
+                
+                -- Process enemy planning for the new turn
+                self:processEnemyPlanning(battle)
+            end
+        end
     end
     
     print("Combat phase advanced to: " .. battle.phase)
@@ -2146,6 +2198,10 @@ function Combat:startNewTurn(battle)
     battle.playerShip.evadeScore = 0
     battle.enemyShip.evadeScore = 0
     
+    -- Clear result display timers
+    battle.displayingResultDuration = nil
+    battle.showContinuePrompt = nil
+    
     -- Set the initial phase for the new turn - enemy planning happens internally
     battle.phase = "playerMovePlanning"
     
@@ -2449,7 +2505,7 @@ end
 -- Draw confirmation window for actions
 function Combat:drawConfirmationWindow(battle, buttonsY, screenWidth)
     local windowWidth = 300
-    local windowHeight = 200
+    local windowHeight = 260 -- Increased height for dice display
     local windowX = (screenWidth - windowWidth) / 2
     local windowY = buttonsY - windowHeight - 20
     
@@ -2541,8 +2597,8 @@ function Combat:drawConfirmationWindow(battle, buttonsY, screenWidth)
         totalDice = totalDice + mod.value
     end
     
-    -- Clamp to valid range (min 0)
-    totalDice = math.max(0, totalDice)
+    -- Clamp to valid range (min 0, max 5)
+    totalDice = math.min(5, math.max(0, totalDice))
     
     -- Draw total dice pool
     love.graphics.setColor(1, 0.8, 0.2, 0.9) -- Gold for total
@@ -2551,6 +2607,61 @@ function Combat:drawConfirmationWindow(battle, buttonsY, screenWidth)
     -- Draw CP cost
     love.graphics.setColor(0.2, 0.8, 0.8, 0.9) -- Cyan for CP
     love.graphics.printf("CP Cost: " .. cpCost, windowX + 20, baseY + 40, windowWidth - 40, "left")
+    
+    -- Initialize dice preview if not already active
+    if not self.dicePreview.active then
+        -- Reset dice preview state
+        self.dicePreview.active = true
+        self.dicePreview.timer = 0
+        self.dicePreview.dicePool = totalDice
+        self.dicePreview.results = {}
+        self.dicePreview.finalResults = {}
+        self.dicePreview.outcome = nil
+        
+        -- Generate initial random dice for animation
+        for i = 1, totalDice do
+            table.insert(self.dicePreview.results, math.random(1, 6))
+        end
+    end
+    
+    -- Draw dice preview animation
+    love.graphics.setColor(1, 1, 1, 1)
+    local diceY = baseY + 70
+    local diceX = windowX + windowWidth/2 - (totalDice * 20) -- Center dice
+    
+    -- Draw the dice animation based on the state
+    if self.dicePreview.finalizing and self.dicePreview.timer < 0.8 then
+        -- If we're finalizing (player has confirmed, dice still rolling), show animation
+        -- Still in final animation, show rolling dice
+        self.diceModule:draw(self.dicePreview.results, diceX, diceY, 1.2)
+    elseif self.dicePreview.finalized then
+        -- Dice have settled and are showing final results
+        -- Show final results with highlighting - use the FIXED final results
+        self.diceModule:drawWithHighlight(self.dicePreview.finalResults, diceX, diceY, 1.2)
+        
+        -- Draw outcome text
+        if self.dicePreview.outcome then
+            local resultText = self.diceModule:getResultText(self.dicePreview.outcome)
+            local resultColor = self.diceModule:getResultColor(self.dicePreview.outcome)
+            
+            -- Set color based on outcome
+            love.graphics.setColor(resultColor[1], resultColor[2], resultColor[3], 0.9)
+            
+            -- Draw result text
+            love.graphics.printf(resultText, windowX, diceY + 45, windowWidth, "center")
+            
+            -- Show message about clicking confirm button again to proceed
+            love.graphics.setColor(1, 1, 1, 0.7 + 0.3 * math.sin(love.timer.getTime() * 3)) -- Pulsing effect
+            love.graphics.printf("Click Confirm to proceed", windowX, diceY + 70, windowWidth, "center")
+        end
+    else
+        -- Regular ongoing dice roll animation (before player confirms)
+        self.diceModule:draw(self.dicePreview.results, diceX, diceY, 1.2)
+        
+        -- Show text indicating player should click confirm
+        love.graphics.setColor(1, 1, 1, 0.7 + 0.3 * math.sin(love.timer.getTime() * 3)) -- Pulsing effect
+        love.graphics.printf("Click Confirm to roll", windowX, diceY + 45, windowWidth, "center")
+    end
     
     -- Draw confirm/cancel buttons
     local buttonWidth = 100
@@ -2611,7 +2722,22 @@ function Combat:hasValidTargetsInFiringArc(battle, ship)
 end
 
 -- Roll dice for an action
-function Combat:rollActionDice(dicePool)
+function Combat:rollActionDice(dicePool, usePreviewResults)
+    -- If we should use the preview results and they're available, use them
+    if usePreviewResults and self.dicePreview.active and #self.dicePreview.finalResults > 0 then
+        local diceResults = self.dicePreview.finalResults
+        local interpretation = self.diceModule:interpret(diceResults)
+        
+        -- Convert to our format
+        return {
+            dice = diceResults,
+            highest = interpretation.highestValue,
+            outcomeLevel = interpretation.level,
+            outcomeName = self:getOutcomeName(interpretation.level)
+        }
+    end
+    
+    -- Otherwise, do a fresh roll
     -- Ensure dicePool is at least 0
     dicePool = math.max(0, dicePool or 0)
     
@@ -2721,8 +2847,14 @@ function Combat:fireCannons(battle, ship, targetQ, targetR)
         totalDice = totalDice + mod.value
     end
     
-    -- Roll the dice
-    local rollResult = self:rollActionDice(totalDice)
+    -- Roll the dice using preview results if available (for player ship)
+    local usePreviewResults = (ship == battle.playerShip) and battle.confirmingAction == "fireCannons"
+    local rollResult = self:rollActionDice(totalDice, usePreviewResults)
+    
+    -- Reset dice preview if we used it
+    if usePreviewResults then
+        self.dicePreview.active = false
+    end
     
     -- Apply damage based on outcome
     local damage = 0
@@ -2778,8 +2910,14 @@ function Combat:performEvade(battle, ship)
         totalDice = totalDice + mod.value
     end
     
-    -- Roll the dice
-    local rollResult = self:rollActionDice(totalDice)
+    -- Roll the dice using preview results if available (for player ship)
+    local usePreviewResults = (ship == battle.playerShip) and battle.confirmingAction == "evade"
+    local rollResult = self:rollActionDice(totalDice, usePreviewResults)
+    
+    -- Reset dice preview if we used it
+    if usePreviewResults then
+        self.dicePreview.active = false
+    end
     
     -- Set evade score based on outcome
     local evadeScore = 0
@@ -2827,8 +2965,14 @@ function Combat:performRepair(battle, ship)
         totalDice = totalDice + mod.value
     end
     
-    -- Roll the dice
-    local rollResult = self:rollActionDice(totalDice)
+    -- Roll the dice using preview results if available (for player ship)
+    local usePreviewResults = (ship == battle.playerShip) and battle.confirmingAction == "repair"
+    local rollResult = self:rollActionDice(totalDice, usePreviewResults)
+    
+    -- Reset dice preview if we used it
+    if usePreviewResults then
+        self.dicePreview.active = false
+    end
     
     -- Calculate repair amount based on outcome
     local repairAmount = 0
@@ -3187,6 +3331,109 @@ function Combat:draw(gameState)
             love.graphics.printf(battle.actionFeedback, 
                           0, buttonsY - 30, screenWidth, "center")
         end
+    elseif battle.phase == "displayingResult" then
+        -- Draw action result information
+        local resultY = buttonsY - 120 -- Increased to make room for dice
+        local windowWidth = screenWidth/2
+        local windowHeight = 100
+        local windowX = (screenWidth - windowWidth) / 2
+        
+        -- Draw a background for the result
+        love.graphics.setColor(0.1, 0.1, 0.3, 0.8)
+        love.graphics.rectangle("fill", windowX, resultY, windowWidth, windowHeight, 5, 5)
+        love.graphics.setColor(0.3, 0.3, 0.5, 1)
+        love.graphics.rectangle("line", windowX, resultY, windowWidth, windowHeight, 5, 5)
+        
+        if battle.actionResult then
+            -- Display action result (ship, action, outcome)
+            love.graphics.setColor(1, 1, 1, 0.9)
+            
+            local actionTitle = ""
+            if battle.actionResult.action == "fireCannons" then
+                actionTitle = (battle.actionResult.ship == "player") and "Your ship fired cannons!" or "Enemy ship fired cannons!"
+            elseif battle.actionResult.action == "evade" then
+                actionTitle = (battle.actionResult.ship == "player") and "Your ship performed evasive maneuvers!" or "Enemy ship performed evasive maneuvers!"
+            elseif battle.actionResult.action == "repair" then
+                actionTitle = (battle.actionResult.ship == "player") and "Your crew repaired the ship!" or "Enemy crew repaired their ship!"
+            end
+            
+            -- Draw title
+            love.graphics.printf(actionTitle, 0, resultY + 10, screenWidth, "center")
+            
+            -- Draw dice results if available
+            if battle.actionResult.rollResult and battle.actionResult.rollResult.dice then
+                local diceY = resultY + 35
+                local diceX = windowX + windowWidth/2 - (#battle.actionResult.rollResult.dice * 20)
+                
+                -- Draw dice with highlighting based on outcome
+                self.diceModule:drawWithHighlight(battle.actionResult.rollResult.dice, diceX, diceY, 1.2)
+            end
+            
+            -- Show outcome text and result
+            local resultTextY = resultY + 70
+            
+            if battle.actionResult.failed then
+                love.graphics.setColor(1, 0.3, 0.3, 0.9) -- Red text
+                love.graphics.printf(battle.actionResult.failReason or "Action failed!", 0, resultTextY, screenWidth, "center")
+            else
+                -- Set outcome text based on roll result
+                local outcomeName = battle.actionResult.rollResult and battle.actionResult.rollResult.outcomeName or "Result"
+                
+                -- Set color based on outcome level
+                if battle.actionResult.rollResult and battle.actionResult.rollResult.outcomeLevel then
+                    if battle.actionResult.rollResult.outcomeLevel == Constants.DICE.OUTCOME_CRITICAL then
+                        love.graphics.setColor(0.1, 0.9, 0.1, 0.9) -- Bright green
+                    elseif battle.actionResult.rollResult.outcomeLevel == Constants.DICE.OUTCOME_SUCCESS then
+                        love.graphics.setColor(0.2, 0.8, 0.2, 0.9) -- Green
+                    elseif battle.actionResult.rollResult.outcomeLevel == Constants.DICE.OUTCOME_PARTIAL then
+                        love.graphics.setColor(0.9, 0.9, 0.2, 0.9) -- Yellow
+                    else
+                        love.graphics.setColor(0.9, 0.2, 0.2, 0.9) -- Red
+                    end
+                end
+                
+                -- Draw outcome name
+                love.graphics.printf(outcomeName, 0, resultTextY, screenWidth, "center")
+                
+                -- Show outcome effect based on action
+                local effectY = resultTextY + 20
+                local effectText = ""
+                
+                if battle.actionResult.action == "fireCannons" and battle.actionResult.damage then
+                    love.graphics.setColor(1, 0.8, 0.2, 0.9) -- Gold text
+                    effectText = "Dealt " .. battle.actionResult.damage .. " damage!"
+                elseif battle.actionResult.action == "evade" and battle.actionResult.evadeScore then
+                    love.graphics.setColor(0.2, 0.8, 1, 0.9) -- Blue text
+                    effectText = "Evade score: " .. battle.actionResult.evadeScore
+                elseif battle.actionResult.action == "repair" and battle.actionResult.damage then
+                    love.graphics.setColor(0.2, 1, 0.2, 0.9) -- Green text
+                    effectText = "Repaired " .. battle.actionResult.damage .. " HP!"
+                elseif battle.actionResult.action == "repair" and battle.actionResult.repairAmount then
+                    love.graphics.setColor(0.2, 1, 0.2, 0.9) -- Green text
+                    effectText = "Repaired " .. battle.actionResult.repairAmount .. " HP!"
+                end
+                
+                love.graphics.printf(effectText, 0, effectY, screenWidth, "center")
+            end
+        else
+            -- Show turn ending message when there's no specific action result
+            love.graphics.setColor(1, 1, 1, 0.9)
+            
+            -- Check if player or enemy actions are coming next
+            if battle.enemyShip.plannedAction and battle.enemyShip.plannedAction ~= "none" then
+                -- Enemy is about to act
+                love.graphics.printf("Turn Ended! Enemy is preparing to act...", 0, resultY + 40, screenWidth, "center")
+            else
+                -- No more actions this turn
+                love.graphics.printf("Turn Ended! Preparing for next turn...", 0, resultY + 40, screenWidth, "center")
+            end
+        end
+        
+        -- Draw "Click to continue" prompt when appropriate
+        if battle.showContinuePrompt then
+            love.graphics.setColor(1, 1, 1, 0.7 + 0.3 * math.sin(love.timer.getTime() * 3)) -- Pulsing effect
+            love.graphics.printf("Click to continue", 0, buttonsY + 20, screenWidth, "center")
+        end
     end
 end
 
@@ -3365,6 +3612,11 @@ function Combat:load(gameState)
     self.assetUtils = require('utils.assetUtils')
     self.shipUtils = require('utils.shipUtils')
     
+    -- Load dice module
+    local diceModule = require('dice')
+    self.diceModule = diceModule.dice -- Access the dice submodule
+    self.diceModule:init() -- Initialize the dice system
+    
     -- Set up color references for easier access
     self.COLORS = {
         PLAYER_SHIP = self.Constants.COLORS.PLAYER_SHIP,
@@ -3435,10 +3687,104 @@ function Combat:update(dt, gameState)
     -- Handle any phase-specific updates (future expansion)
     if battle.phase == "playerActionPlanning" then
         -- Update action planning UI animations, if any
+        
+        -- Check if there's a pending action after dice roll
+        if battle.pendingActionTimer then
+            battle.pendingActionTimer = battle.pendingActionTimer - dt
+            
+            if battle.pendingActionTimer <= 0 then
+                -- Time to execute the pending action
+                battle.pendingActionTimer = nil
+                
+                -- Execute the appropriate action
+                if battle.pendingAction == "fireCannons" and battle.targetHex then
+                    -- Execute fire cannons action with stored target
+                    self:fireCannons(battle, battle.playerShip, battle.targetHex[1], battle.targetHex[2])
+                    battle.confirmingAction = nil
+                    battle.targetHex = nil
+                    -- After action completes, advance to next phase
+                    self:advanceToNextPhase(battle)
+                elseif battle.pendingAction == "evade" then
+                    -- Execute evade action
+                    self:performEvade(battle, battle.playerShip)
+                    battle.confirmingAction = nil
+                    -- After action completes, advance to next phase
+                    self:advanceToNextPhase(battle)
+                elseif battle.pendingAction == "repair" then
+                    -- Execute repair action
+                    self:performRepair(battle, battle.playerShip)
+                    battle.confirmingAction = nil
+                    -- After action completes, advance to next phase
+                    self:advanceToNextPhase(battle)
+                end
+                
+                battle.pendingAction = nil
+            end
+        end
+        
+        -- Update dice preview animation if active
+        if self.dicePreview.active then
+            self.dicePreview.timer = self.dicePreview.timer + dt
+            
+            if self.dicePreview.finalizing then
+                -- We're in the finalizing mode (player has clicked confirm)
+                -- Generate the final roll results if not already done
+                if #self.dicePreview.finalResults == 0 then
+                    -- Generate final dice results
+                    local diceResults, rollInfo = self.diceModule:roll(self.dicePreview.dicePool, {})
+                    self.dicePreview.finalResults = diceResults
+                    self.dicePreview.outcome = self.diceModule:interpret(diceResults)
+                    
+                    -- We'll continue rolling for a short time after player confirms
+                    -- to avoid making it feel like they need to time their click
+                    self.dicePreview.timer = 0 -- Reset timer for final animation
+                end
+                
+                -- Continue rolling for a short time after confirming
+                if self.dicePreview.timer < 0.8 then
+                    -- Keep rolling randomly during the final animation
+                    if self.dicePreview.timer % self.dicePreview.speed < dt then
+                        -- Generate random dice results for animation
+                        self.dicePreview.results = {}
+                        for i = 1, self.dicePreview.dicePool do
+                            table.insert(self.dicePreview.results, math.random(1, 6))
+                        end
+                    end
+                else
+                    -- We've reached the end of the dice animation
+                    -- Show the final result and stop rolling
+                    
+                    -- Only set the results once to avoid flicker
+                    if not self.dicePreview.finalized then
+                        -- Set the final result
+                        self.dicePreview.results = self.dicePreview.finalResults
+                        
+                        -- Switch from "finalizing" to "finalized" state
+                        -- This will keep the window open with final results
+                        self.dicePreview.finalizing = false
+                        self.dicePreview.finalized = true
+                    end
+                end
+            else
+                -- Normal rolling animation (before player confirms)
+                -- Periodically update dice roll animation
+                if self.dicePreview.timer % self.dicePreview.speed < dt then
+                    -- Generate random dice results for animation
+                    self.dicePreview.results = {}
+                    for i = 1, self.dicePreview.dicePool do
+                        table.insert(self.dicePreview.results, math.random(1, 6))
+                    end
+                end
+            end
+        end
     elseif battle.phase == "actionResolution" then
         -- Update action resolution animations, if any
     elseif battle.phase == "displayingResult" then
         -- Update result display animations, if any
+        
+        -- Check if we need to draw a "click to continue" prompt
+        battle.displayingResultDuration = (battle.displayingResultDuration or 0) + dt
+        battle.showContinuePrompt = battle.displayingResultDuration > 0.5 -- Show prompt after half a second
     end
 end
 
